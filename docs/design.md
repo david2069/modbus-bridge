@@ -111,6 +111,86 @@ User quirk lifecycle:
 | U10 | App update | User quirks are kept. If a shipped quirk now covers the same reading, the user's quirk still wins and the user is told. |
 | U11 | Share | A user quirk can be exported with its reason and evidence, as a proposal for a shipped quirk. |
 
+## 2c. Modular design (D6, D7)
+
+Two parts joined by a REST API that is always on. Optional modules can be switched on or off. Home Assistant is fed through MQTT Discovery (D8). Changes are pushed by server-sent events (D9). Writes from modules come in their own phase after P2 (D10).
+
+```mermaid
+flowchart LR
+  DEV[(Modbus TCP device<br/>battery / inverter)]
+
+  subgraph P1[Part 1: Device model]
+    CONN[One connection per server<br/>modbus-connection]
+    DISC[Discovery<br/>SunSpec scan, Model 1]
+    CAT[Catalogue as data<br/>SunSpec models, PICS profiles,<br/>vendor raw maps]
+    IMP[Implemented points<br/>PICS, else discovered]
+    QUIRK[Quirk layers L1–L5]
+    EVAL[Evaluator<br/>constants and rules, with trace]
+  end
+
+  API{{REST API<br/>always on}}
+
+  subgraph P2[Part 2: Bridge]
+    HA[HA publisher<br/>MQTT Discovery]
+    UI[Web UI]
+    subgraph MODS[Optional modules, each on or off]
+      SCH[Scheduler]
+      BILL[Utility billing]
+      NOTE[Notifications]
+      VIEW[System viewer]
+      DASH[Dashboards]
+    end
+  end
+
+  MQTT[(MQTT broker)]
+  HASS[(Home Assistant)]
+
+  DEV <--> CONN
+  CONN --> DISC --> CAT --> IMP --> QUIRK --> EVAL
+  EVAL --> API
+  API <--> HA <--> MQTT <--> HASS
+  API <--> UI
+  API <--> MODS
+```
+
+How a device is added and then polled:
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant UI as Web UI
+  participant API as REST API
+  participant DM as Device model
+  participant Dev as Device
+  participant HA as HA publisher
+  participant Mod as Optional module
+
+  User->>UI: Add device (host, port)
+  UI->>API: Add device
+  API->>DM: Discover
+  DM->>Dev: Find SunSpec, read Model 1, walk chain
+  DM->>DM: Match catalogue (Mn, Md, Vr)
+  alt PICS profile in catalogue
+    DM->>DM: Implemented points from PICS
+  else no PICS
+    DM->>Dev: Read chain several times
+    DM->>DM: Implemented points from reads
+  end
+  DM-->>API: What was found
+  API-->>UI: Show it
+  User->>UI: Confirm
+  loop every poll
+    DM->>Dev: Read models and raw registers
+    DM->>DM: Apply quirks, run evaluator
+    DM-->>API: Values, each with its trace
+    API-->>HA: Implemented points only
+    API-->>Mod: Values, if the module is on
+  end
+  Mod->>API: Request a change (e.g. scheduler)
+  API->>DM: Checked write
+  DM->>Dev: Write
+```
+
 ## 3. Vendor-neutral labels (non-SunSpec readings)
 
 The FranklinWH sources are from franklinwh-modbus's published documentation.
@@ -194,9 +274,10 @@ hilman2 lists no EVSE (car charger).
 | P0 | Baseline design | Agreed 2026-11-03 |
 | P1 | Read and publish baseline SunSpec: connect, Model 1, every model, standard names | An emulated aGate and one other SunSpec device publish correctly |
 | P2 | Quirk layers L2–L5, neutral labels, the evaluator (3a) and user quirks (2b), with FranklinWH first | FranklinWH extensions show under N1–N11, with every quirk visible |
+| P2W | Writes from modules through the REST API, limited by the quirk layers (D10) | Each write passes its own test plan against the emulator |
 | P3 | Import hilman2's quirk set for a maker, only when users need it, with credit | Each imported set loads and is credited |
 | P4 | Takeover of existing integrations | The cjne takeover test is repeated with modbus-bridge |
-| P5 | Bring over the FranklinWH bridge's web UI and other functions | One function at a time, each agreed first |
+| P5 | Bring over the FranklinWH bridge's web UI and other functions, each with an importer for its users' settings (D11) | One function at a time, each agreed first; each importer passes a test with exported data from that bridge |
 
 ## 6. Decisions (owner, 2026-11-03)
 
@@ -205,6 +286,30 @@ hilman2 lists no EVSE (car charger).
 - **D3.** The neutral labels are N1–N11 as drafted. The names are reviewed when FranklinWH is built in P2.
 - **D4.** The evaluator in 3a: a small fixed formula language, rules as data, and a trace on every result.
 - **D5.** One HA device per unit id on the same address, all sharing one connection that takes turns. There is no HA device per SunSpec model.
+
+### Added 2026-11-03
+
+- **D6. Implemented points.** A point is either implemented by the device or not.
+  1. A point that is not implemented is never published. It is listed in diagnostics only.
+  2. An implemented point that gives no value is shown as unavailable, never as 0 or a guess (rule 8).
+  3. With a PICS: a device's published SunSpec certification statement lists its implemented models and points. A PICS can be loaded as data to give a prebuilt profile for that maker, model and firmware, credited with its source.
+  4. Without a PICS: the implemented points are discovered by reading the device several times. A point counts as not implemented only if it gives SunSpec's "not implemented" value on every read. A point that later gives a value becomes implemented, and this is logged.
+  5. A PICS covers only what was certified. Readings outside it still come from raw register maps (goal 2).
+- **D7. Two parts, with optional modules.**
+  1. **Device model:** SunSpec models, PICS profiles, extensions, quirks and the evaluator (rule engine). It works out what a device offers and what each value means.
+  2. **Bridge:** the Home Assistant bridge and UI, plus optional modules such as a scheduler, utility billing, notifications, a system viewer and dashboards. Each module can be switched on or off.
+  3. **REST API is the mandatory glue.** The parts and modules connect through a REST API. It is always on and cannot be switched off.
+- **D8. Home Assistant is fed through MQTT Discovery,** as in franklinwh-modbus-bridge. The HA publisher is a client of the REST API (D7). Known consequence for P4: in the handover's takeover test, the MQTT method kept history and automations but lost user names, icons and areas.
+- **D9. Pushing changes.** A client asks the REST API for a full snapshot when it connects, then receives each change by server-sent events. Writes go the other way as ordinary REST requests.
+- **D10. Writes come after P2,** in their own phase (P2W), once the quirk layers can set safe limits. Each write has its own written test plan.
+- **D11. Import from franklinwh-modbus-bridge.** Users can import their schedules, billing and utility (tariff) templates and other module settings from franklinwh-modbus-bridge. Each module brought over in P5 comes with its importer. An import is checked and previewed before it is saved, and anything it cannot carry over is listed, never dropped silently.
+- **D12. REST API and modules, learned from franklinwh-modbus-bridge** (review of commit fca3db3, 2026-11-03).
+  1. Paths carry a version from the start: `/api/v1/...`.
+  2. Clients that are programs (the MQTT publisher, modules) use API tokens. Browser sessions are for people only.
+  3. Switching a module off stops its background work, not only its pages.
+  4. Reuse from franklinwh-modbus-bridge in P5: the scheduler and tariff logic, the UI, and its schedule and tariff export files as importer inputs (D11). Its wiring, module switches and login are not reused.
+  5. Importers ask the user again for passwords and tokens; they are never copied from an old database.
+  6. Imported schedules need a table from FranklinWH action and condition names to the neutral labels (N7, N8). This is settled with the label review in P2.
 
 ## Credits
 
