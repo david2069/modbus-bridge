@@ -18,6 +18,7 @@ from modbus_connection import ModbusUnit
 from .implemented import ImplementedPoints, discover_implemented
 from .pics import PicsProfile, apply_pics
 from .poller import PointState, Poller
+from .quirks import ActiveQuirks, QuirkSet
 from .sunspec import SunSpecDevice, discover
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ def point_json(state: PointState) -> dict[str, Any]:
         "type": state.sunspec_type,
         "value": json_value(state.value),
         "available": state.available,
+        "quirks": list(state.quirks),
     }
 
 
@@ -66,6 +68,8 @@ class DeviceService:
         profile: PicsProfile | None = None,
         reads: int = 3,
         read_interval: float = 1.0,
+        quirk_sets: Sequence[QuirkSet] = (),
+        quirks_off: Sequence[str] = (),
     ) -> None:
         self.device_id = device_id
         self._unit = unit
@@ -73,6 +77,9 @@ class DeviceService:
         self._profile = profile
         self._reads = reads
         self._read_interval = read_interval
+        self._quirk_sets = list(quirk_sets)
+        self._quirks_off = list(quirks_off)
+        self.quirks: ActiveQuirks | None = None
         self.device: SunSpecDevice | None = None
         self.poller: Poller | None = None
         self.sequence = 0
@@ -88,12 +95,14 @@ class DeviceService:
     async def setup(self) -> None:
         """Discover the device and its implemented points, then poll once."""
         self.device = await discover(self._unit)
+        # Model 1 is read on every connect, so a new firmware picks its quirks here.
+        self.quirks = ActiveQuirks(self._quirk_sets, self.device.identity, self._quirks_off)
         implemented, _ = await discover_implemented(
             self._unit, self.device.chain, self._reads, self._read_interval
         )
         if self._profile is not None:
             implemented, _ = apply_pics(implemented, self._profile)
-        self.poller = Poller(self._unit, self.device.chain, implemented)
+        self.poller = Poller(self._unit, self.device.chain, implemented, self.quirks)
         await self.poll_once()
 
     async def poll_once(self) -> list[PointState]:

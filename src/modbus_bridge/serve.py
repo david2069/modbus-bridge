@@ -3,6 +3,7 @@
 Usage:
     python -m modbus_bridge.serve --device-host 192.0.2.10 --device-port 502 --unit 1
         --token-file PATH [--pics PROFILE.json] [--interval 5]
+        [--quirks FILE_OR_DIR ...] [--quirk-off ID ...]
         [--listen-host 127.0.0.1] [--listen-port 8080] [--device-id unit1]
 
 The API token is read from a file, never from the command line, so it does not
@@ -25,12 +26,18 @@ from modbus_connection.tmodbus import ModbusConnection
 
 from .api import create_app
 from .pics import PicsProfile
+from .quirks import QuirkError, load_sets
 from .service import DeviceService
 
 
 def build(args: argparse.Namespace) -> FastAPI:
     tokens = [line.strip() for line in args.token_file.read_text().splitlines() if line.strip()]
     profile = PicsProfile.load(args.pics) if args.pics else None
+    quirk_sets = load_sets(args.quirks)
+    known = {quirk.id for quirk_set in quirk_sets for quirk in quirk_set.quirks}
+    unknown = sorted(set(args.quirk_off) - known)
+    if unknown:
+        raise QuirkError(f"cannot switch off unknown quirk id(s) {', '.join(unknown)}")
     connection = ModbusConnection(
         ModbusTcpParams(host=args.device_host, port=args.device_port), timeout=args.timeout
     )
@@ -39,6 +46,8 @@ def build(args: argparse.Namespace) -> FastAPI:
         connection.for_unit(args.unit),
         interval=args.interval,
         profile=profile,
+        quirk_sets=quirk_sets,
+        quirks_off=args.quirk_off,
     )
 
     @asynccontextmanager
@@ -65,11 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pics", type=Path, help="a PICS profile from scripts/convert_pics.py")
     parser.add_argument("--interval", type=float, default=5.0, help="seconds between polls")
     parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument(
+        "--quirks", type=Path, action="append", default=[],
+        help="a quirk-set file, or a directory of them (repeatable)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--quirk-off", action="append", default=[], metavar="ID",
+        help="switch off the quirk with this id (repeatable)",
+    )  # fmt: skip
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=8080)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    uvicorn.run(build(args), host=args.listen_host, port=args.listen_port, log_level="info")
+    try:
+        app = build(args)
+    except QuirkError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 2
+    uvicorn.run(app, host=args.listen_host, port=args.listen_port, log_level="info")
     return 0
 
 

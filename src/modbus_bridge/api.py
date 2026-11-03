@@ -113,6 +113,13 @@ def create_app(
     async def points(device_id: str) -> dict[str, Any]:
         return snapshot_json(get_service(device_id))
 
+    @app.get(f"{PREFIX}/devices/{{device_id}}/quirks", dependencies=auth)
+    async def quirks(device_id: str) -> dict[str, Any]:
+        service = get_service(device_id)
+        if service.quirks is None:
+            raise HTTPException(status_code=503, detail=f"Device {device_id!r} is not ready")
+        return {"device": service.device_id, **service.quirks.report()}
+
     @app.get(f"{PREFIX}/devices/{{device_id}}/events", dependencies=auth)
     async def events(device_id: str) -> StreamingResponse:
         service = get_service(device_id)
