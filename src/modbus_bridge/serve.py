@@ -1,0 +1,77 @@
+"""Run the REST API for one device.
+
+Usage:
+    python -m modbus_bridge.serve --device-host 192.0.2.10 --device-port 502 --unit 1
+        --token-file PATH [--pics PROFILE.json] [--interval 5]
+        [--listen-host 127.0.0.1] [--listen-port 8080] [--device-id unit1]
+
+The API token is read from a file, never from the command line, so it does not
+show in the process list.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from modbus_connection import ModbusTcpParams
+from modbus_connection.tmodbus import ModbusConnection
+
+from .api import create_app
+from .pics import PicsProfile
+from .service import DeviceService
+
+
+def build(args: argparse.Namespace) -> FastAPI:
+    tokens = [line.strip() for line in args.token_file.read_text().splitlines() if line.strip()]
+    profile = PicsProfile.load(args.pics) if args.pics else None
+    connection = ModbusConnection(
+        ModbusTcpParams(host=args.device_host, port=args.device_port), timeout=args.timeout
+    )
+    service = DeviceService(
+        args.device_id or f"unit{args.unit}",
+        connection.for_unit(args.unit),
+        interval=args.interval,
+        profile=profile,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await connection.connect()
+        try:
+            await service.setup()
+            service.start()
+            yield
+        finally:
+            await service.stop()
+            await connection.close()
+
+    return create_app({service.device_id: service}, tokens, lifespan=lifespan)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--device-host", required=True)
+    parser.add_argument("--device-port", type=int, default=502)
+    parser.add_argument("--unit", type=int, default=1)
+    parser.add_argument("--device-id", help="id used in API paths (default: unit<N>)")
+    parser.add_argument("--timeout", type=float, default=5.0, help="Modbus request timeout")
+    parser.add_argument("--pics", type=Path, help="a PICS profile from scripts/convert_pics.py")
+    parser.add_argument("--interval", type=float, default=5.0, help="seconds between polls")
+    parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument("--listen-host", default="127.0.0.1")
+    parser.add_argument("--listen-port", type=int, default=8080)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    uvicorn.run(build(args), host=args.listen_host, port=args.listen_port, log_level="info")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

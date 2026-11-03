@@ -8,14 +8,13 @@ from typing import Final
 
 from modbus_connection import ModbusExceptionError, ModbusUnit
 from modbus_connection.model.sunspec import (
-    SunSpecComponent,
     SunSpecError,
     SunSpecModel,
     SunSpecModels,
     scan,
-    string,
-    uint16,
 )
+
+from . import sunspec_models
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,20 +23,6 @@ BASE_ADDRESSES: Final = (40000, 0, 50000)
 
 #: The SunSpec Common model.
 COMMON_MODEL_ID: Final = 1
-
-
-class CommonModel(SunSpecComponent):
-    """SunSpec Model 1 (Common), from the public SunSpec model definition.
-
-    Addresses are offsets from the model header, which takes offsets 0 and 1.
-    """
-
-    mn = string(2, 16)
-    md = string(18, 16)
-    opt = string(34, 8)
-    vr = string(42, 8)
-    sn = string(50, 16)
-    da = uint16(66)
 
 
 @dataclass(frozen=True)
@@ -94,7 +79,10 @@ async def read_identity(unit: ModbusUnit, models: SunSpecModels) -> DeviceIdenti
     found = models.first(COMMON_MODEL_ID)
     if found is None:
         raise SunSpecError("The SunSpec chain has no Model 1")
-    common = CommonModel(unit, found)
+    common_class = sunspec_models.component_class(COMMON_MODEL_ID)
+    if common_class is None:
+        raise SunSpecError("No generated component for Model 1")
+    common = common_class(unit, found)
     await common.async_update()
     da = common.da
     return DeviceIdentity(

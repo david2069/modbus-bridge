@@ -10,7 +10,7 @@ from modbus_connection.encode import encode_string
 from modbus_connection.mock import MockModbusUnit
 from modbus_connection.model.sunspec import SunSpecError
 
-from modbus_bridge.probe import MISSING, format_device
+from modbus_bridge.probe import NOT_SET, format_device
 from modbus_bridge.sunspec import discover
 
 SUNS = [0x5375, 0x6E53]  # "SunS"
@@ -64,7 +64,7 @@ def test_empty_string_is_missing(mock_modbus_unit: MockModbusUnit) -> None:
     device = asyncio.run(discover(mock_modbus_unit))
 
     assert device.identity.options is None
-    assert f"Opt {MISSING}" in format_device(device)
+    assert f"Opt {NOT_SET}" in format_device(device)
 
 
 def test_falls_back_to_base_0(mock_modbus_unit: MockModbusUnit) -> None:
