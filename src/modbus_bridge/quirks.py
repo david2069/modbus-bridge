@@ -478,6 +478,7 @@ class ActiveQuirks:
                 value=None if reading.id not in results else results[reading.id].value,
                 sunspec_type=reading.type,
                 quirks=(reading.id,),
+                total=reading.total,
             )
             for reading in self.readings
         ]

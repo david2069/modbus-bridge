@@ -65,8 +65,17 @@ def slug(text: str) -> str:
     return f"m{out}" if out[:1].isdigit() else out
 
 
-def model_id(key: str) -> int:
-    return int(re.split(r"[.#]", key, maxsplit=1)[0])
+def model_id(key: str) -> int | None:
+    """The SunSpec model of a point key, or ``None`` for a ``raw.`` or ``label.`` key."""
+    head = re.split(r"[.#]", key, maxsplit=1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def enabled_by_default(key: str) -> bool:
+    """Labels and measurement models are enabled; raw readings and other models are not."""
+    if key.startswith("label."):
+        return True
+    return model_id(key) in ENABLED_BY_DEFAULT_MODELS
 
 
 def state_text(value: Any) -> str | None:
@@ -89,11 +98,16 @@ def _is_numeric(point: Mapping[str, Any]) -> bool:
     if isinstance(value, dict):
         return False
     sunspec_type = point.get("type") or ""
+    if sunspec_type == "rule":
+        # A rule's output is a number when the rule gives it units.
+        return point.get("options") is None and bool(point.get("units"))
     return sunspec_type.startswith(("int", "uint", "acc", "float", "sunssf"))
 
 
 def sensor_classes(point: Mapping[str, Any]) -> dict[str, str]:
     """Unit, device class and state class for one point, as discovery fields."""
+    if point.get("options") is not None:
+        return {"device_class": "enum", "options": [str(o) for o in point["options"]]}
     if not _is_numeric(point):
         return {}
     fields: dict[str, str] = {}
@@ -104,7 +118,14 @@ def sensor_classes(point: Mapping[str, Any]) -> dict[str, str]:
     name = point.get("name", "")
     sunspec_type = point.get("type") or ""
     if ha_unit == "Wh":
-        if sunspec_type.startswith("acc") or _LIFETIME_ENERGY.search(name):
+        if (
+            point.get("total")
+            or sunspec_type.startswith("acc")
+            or (
+                not point.get("key", "").startswith(("raw.", "label."))
+                and _LIFETIME_ENERGY.search(name)
+            )
+        ):
             fields["device_class"] = "energy"
             fields["state_class"] = "total_increasing"
             return fields
@@ -180,7 +201,7 @@ class DiscoveryPublisher:
             ],
             "availability_mode": "all",
             "device": self.device,
-            "enabled_by_default": model_id(key) in ENABLED_BY_DEFAULT_MODELS,
+            "enabled_by_default": enabled_by_default(key),
             **sensor_classes(point),
         }
         if model_id(key) == 1:

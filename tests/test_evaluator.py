@@ -185,6 +185,11 @@ def test_latch_remembers_one_flag() -> None:
     )
 
 
+def test_total_must_be_true_or_false() -> None:
+    with pytest.raises(QuirkError, match="total must be true or false"):
+        QuirkSet.from_json(rules_set(rule("r", "x", "1") | {"total": 1}))
+
+
 def test_latch_rules_checked() -> None:
     with pytest.raises(QuirkError, match="needs a latch"):
         QuirkSet.from_json(rules_set(rule("r", "x", "1 if latched else 0")))

@@ -136,3 +136,51 @@ def test_sse_parser() -> None:
         ("snapshot", "3", '{"a": 1}'),
         ("message", None, "x"),
     ]
+
+
+def label(name: str, value, units=None, options=None, total=False) -> dict:
+    out = point(f"label.{name}", value, units, "rule", label=name.replace("_", " ").capitalize())
+    if options is not None:
+        out["options"] = options
+    if total:
+        out["total"] = True
+    return out
+
+
+def test_raw_and_label_points() -> None:
+    pub = DiscoveryPublisher(DETAIL)
+    raw = json.loads(pub.discovery(point("raw.mode", 2)).payload)
+    lab = json.loads(pub.discovery(label("load_power", 312, "W")).payload)
+    assert raw["enabled_by_default"] is False
+    assert lab["enabled_by_default"] is True
+    assert "entity_category" not in raw and "entity_category" not in lab
+    assert lab["name"] == "Load power"
+    assert lab["unique_id"].endswith("_label_load_power")
+    assert (lab["unit_of_measurement"], lab["device_class"], lab["state_class"]) == (
+        "W",
+        "power",
+        "measurement",
+    )
+
+
+def test_enum_label() -> None:
+    fields = sensor_classes(label("mode", "backup", options=["backup", "self_consumption"]))
+    assert fields == {"device_class": "enum", "options": ["backup", "self_consumption"]}
+    assert sensor_classes(label("fitted", 1, options=[0, 1]))["options"] == ["0", "1"]
+
+
+def test_text_label_has_no_classes() -> None:
+    assert sensor_classes(label("note", "hello")) == {}
+
+
+def test_total_marks_lifetime_energy() -> None:
+    assert sensor_classes(label("solar_energy", 10, "Wh", total=True)) == {
+        "unit_of_measurement": "Wh",
+        "device_class": "energy",
+        "state_class": "total_increasing",
+    }
+    assert sensor_classes(point("raw.e", 10, "Wh", "uint32"))["device_class"] == "energy_storage"
+    # The SunSpec name pattern applies to SunSpec points only.
+    assert sensor_classes(point("raw.TotWhInj", 10, "Wh", "uint32"))["device_class"] == (
+        "energy_storage"
+    )

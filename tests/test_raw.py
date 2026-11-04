@@ -78,6 +78,7 @@ def test_nan_is_no_value() -> None:
         ({"invert": 1}, "invert"),
         ({"name": "Bad Name"}, "name"),
         ({"unavailable": "65535"}, "unavailable"),
+        ({"total": "yes"}, "total"),
     ],
 )
 def test_bad_readings_refused(change: dict, message: str) -> None:

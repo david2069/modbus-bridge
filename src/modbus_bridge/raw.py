@@ -32,7 +32,7 @@ TYPES: dict[str, tuple[int, str]] = {
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _FIELDS_REQUIRED = {"id", "name", "reason", "address", "type"}
 _FIELDS_OPTIONAL = {"source", "table", "word_order", "scale", "invert", "units", "label",
-                    "unavailable"}  # fmt: skip
+                    "unavailable", "total"}  # fmt: skip
 
 
 class RawReadingError(ValueError):
@@ -56,6 +56,8 @@ class RawReading:
     units: str | None = None
     label: str | None = None
     unavailable: frozenset[float] = field(default_factory=frozenset)
+    total: bool = False
+    """The value only counts up over the device's life (a lifetime energy total)."""
 
     @property
     def key(self) -> str:
@@ -80,6 +82,7 @@ class RawReading:
             "units": self.units,
             "label": self.label,
             "unavailable": sorted(self.unavailable),
+            "total": self.total,
             "reason": self.reason,
             "source": self.source,
         }
@@ -143,6 +146,9 @@ def parse_reading(data: Any, layer: str, set_id: str, source: str) -> RawReading
         isinstance(v, bool) or not isinstance(v, (int, float)) for v in unavailable
     ):
         raise RawReadingError(f"reading {rid!r}: unavailable must be a list of numbers")
+    total = data.get("total", False)
+    if not isinstance(total, bool):
+        raise RawReadingError(f"reading {rid!r}: total must be true or false")
     return RawReading(
         id=text("id", rid),
         name=name,
@@ -159,6 +165,7 @@ def parse_reading(data: Any, layer: str, set_id: str, source: str) -> RawReading
         units=text("units", data["units"]) if "units" in data else None,
         label=text("label", data["label"]) if "label" in data else None,
         unavailable=frozenset(unavailable),
+        total=total,
     )
 
 

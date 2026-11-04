@@ -38,6 +38,10 @@ class PointState:
     """Ids of the quirks applied to this point."""
     trace: Mapping[str, Any] | None = field(default=None, compare=False)
     """For a rule's output: the rule, its inputs and the constants used."""
+    options: tuple[Any, ...] | None = None
+    """For a rule's output: the only values it can have, if the rule lists them."""
+    total: bool = False
+    """The value only counts up over the device's life (a lifetime energy total)."""
 
     @property
     def available(self) -> bool:

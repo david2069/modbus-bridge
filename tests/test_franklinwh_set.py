@@ -142,3 +142,15 @@ def test_missing_input_gives_no_value() -> None:
 def test_rule_can_be_switched_off() -> None:
     outs = run(found(off=["fwh-n7-r5"]), raw__operating_mode=2)
     assert "battery_operating_mode" not in outs
+
+
+def test_point_json_carries_options_and_total() -> None:
+    from modbus_bridge.service import point_json
+
+    outs = run(found(), raw__operating_mode=2, raw__pv_energy_total=10)
+    mode = point_json(next(s for k, s in outs.items() if k == "battery_operating_mode"))
+    assert mode["options"] == ["emergency_backup", "self_consumption", "time_of_use"]
+    assert "total" not in mode
+    energy = point_json(outs["solar_energy_total"])
+    assert energy["total"] is True
+    assert "options" not in energy

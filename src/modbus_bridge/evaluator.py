@@ -317,10 +317,17 @@ class Rule:
     set_id: str
     constants: frozenset[str] = field(default_factory=frozenset)
     """Names in the formula that are not inputs: looked up as constants."""
+    total: bool = False
+    """The output only counts up over the device's life (a lifetime energy total)."""
 
     @property
     def key(self) -> str:
         return f"label.{self.output}"
+
+    @property
+    def options(self) -> tuple[Any, ...] | None:
+        """The allowed output values, if the rule lists them."""
+        return None if self.values is None else tuple(self.values)
 
     def depends_on(self) -> set[str]:
         """Outputs of other rules this rule reads."""
@@ -339,6 +346,7 @@ class Rule:
             "values": None if self.values is None else [[k, v] for k, v in self.values.items()],
             "units": self.units,
             "label": self.label,
+            "total": self.total,
             "reason": self.reason,
             "source": self.source,
         }
@@ -362,7 +370,7 @@ def _pairs(value: Any, what: str) -> dict[Any, Any]:
 
 def parse_rule(data: Any, layer: str, set_id: str, source: str, key_check: re.Pattern[str]) -> Rule:
     _fields(data, "rule", {"id", "output", "inputs", "formula", "reason"},
-            {"latch", "tables", "values", "units", "label", "source"})  # fmt: skip
+            {"latch", "tables", "values", "units", "label", "source", "total"})  # fmt: skip
     rid = _text(data["id"], "rule id")
     what = f"rule {rid}"
     inputs = data["inputs"]
@@ -392,6 +400,9 @@ def parse_rule(data: Any, layer: str, set_id: str, source: str, key_check: re.Pa
         raise RuleError(f"{what}: latch cannot use 'latched'")
     if LATCHED in names and latch is None:
         raise RuleError(f"{what}: 'latched' needs a latch")
+    total = data.get("total", False)
+    if not isinstance(total, bool):
+        raise RuleError(f"{what}: total must be true or false")
     return Rule(
         id=rid,
         output=_name(data["output"], f"{what}: output"),
@@ -407,6 +418,7 @@ def parse_rule(data: Any, layer: str, set_id: str, source: str, key_check: re.Pa
         layer=layer,
         set_id=set_id,
         constants=frozenset(names - inputs.keys() - {LATCHED}),
+        total=total,
     )
 
 
@@ -542,7 +554,10 @@ class RuleEngine:
         out: list[PointState] = []
         for key in sorted(self.blocked):
             rule = next(r for r in self.all_rules if r.key == key)
-            out.append(PointState(key, rule.output, rule.label, rule.units, False, None, "rule"))
+            out.append(
+                PointState(key, rule.output, rule.label, rule.units, False, None, "rule",
+                           options=rule.options, total=rule.total)
+            )  # fmt: skip
         for rule in self.rules:
             value, trace = self._run(rule, known)
             state = PointState(
@@ -555,6 +570,8 @@ class RuleEngine:
                 sunspec_type="rule",
                 quirks=(rule.id,),
                 trace=trace,
+                options=rule.options,
+                total=rule.total,
             )
             known[rule.key] = state
             out.append(state)
