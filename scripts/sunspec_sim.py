@@ -155,17 +155,48 @@ def inverter_models(t: float) -> list[tuple[int, Mapping[str, Any], Mapping[str,
     return [(1, IDENTITY, {}), (103, m103, {}), (120, m120, {}), (160, m160, {"module": MODULES})]
 
 
+def extra_registers(t: float) -> dict[int, int]:
+    """Made-up registers outside SunSpec, for raw-reading tests (``--extra``).
+
+    1000 mode (uint16, 2); 1001-1002 power (int32, low word first, negative and
+    changing); 1003 always 65535; 1004-1005 energy (uint32, high word first).
+    Nothing at 1006 or above.
+    """
+    power = -round(1000 + 500 * math.sin(t / 5))
+    low, high = struct.unpack(">HH", struct.pack(">i", power))[::-1]
+    energy = 500_000 + int(t)
+    return {
+        1000: 2,
+        1001: low,
+        1002: high,
+        1003: 0xFFFF,
+        1004: energy >> 16,
+        1005: energy & 0xFFFF,
+    }
+
+
 class SunSpecSimulator:
     """Serve a register map over Modbus TCP (function 3 only)."""
 
     def __init__(
-        self, models: Callable[[float], list[tuple[int, Mapping[str, Any], Mapping[str, int]]]]
+        self,
+        models: Callable[[float], list[tuple[int, Mapping[str, Any], Mapping[str, int]]]],
+        extra: Callable[[float], Mapping[int, int]] | None = None,
     ) -> None:
         self._models = models
+        self._extra = extra
         self._start = time.monotonic()
 
     def registers(self) -> list[int]:
         return build_map(self._models(time.monotonic() - self._start))
+
+    def _extra_block(self, address: int, count: int) -> list[int] | None:
+        if self._extra is None:
+            return None
+        values = self._extra(time.monotonic() - self._start)
+        if all(a in values for a in range(address, address + count)):
+            return [values[a] for a in range(address, address + count)]
+        return None
 
     def answer(self, unit: int, pdu: bytes) -> bytes:
         function = pdu[0]
@@ -176,9 +207,13 @@ class SunSpecSimulator:
             return bytes([0x83, 3])  # illegal data value
         regs = self.registers()
         offset = address - BASE_ADDRESS
-        if offset < 0 or offset + count > len(regs):
-            return bytes([0x83, 2])  # illegal data address
-        data = struct.pack(f">{count}H", *regs[offset : offset + count])
+        if 0 <= offset and offset + count <= len(regs):
+            block = regs[offset : offset + count]
+        else:
+            block = self._extra_block(address, count)
+            if block is None:
+                return bytes([0x83, 2])  # illegal data address
+        data = struct.pack(f">{count}H", *block)
         return bytes([3, len(data)]) + data
 
     async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -199,8 +234,9 @@ class SunSpecSimulator:
         return await asyncio.start_server(self._client, host, port)
 
 
-async def _serve(host: str, port: int) -> None:
-    server = await SunSpecSimulator(inverter_models).start(host, port)
+async def _serve(host: str, port: int, extra: bool) -> None:
+    sim = SunSpecSimulator(inverter_models, extra_registers if extra else None)
+    server = await sim.start(host, port)
     print(f"SunSpec simulator on {host}:{port} (base {BASE_ADDRESS})", flush=True)
     async with server:
         await server.serve_forever()
@@ -210,9 +246,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5121)
+    parser.add_argument("--extra", action="store_true", help="serve made-up registers 1000-1005")
     args = parser.parse_args(argv)
     try:
-        asyncio.run(_serve(args.host, args.port))
+        asyncio.run(_serve(args.host, args.port, args.extra))
     except KeyboardInterrupt:
         pass
     return 0

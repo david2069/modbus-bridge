@@ -19,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .raw import RawReading, RawReadingError, RawResult, by_name, parse_reading
+
 if TYPE_CHECKING:
     from .poller import PointState
     from .sunspec import DeviceIdentity
@@ -37,7 +39,7 @@ _MATCH_FIELDS = {
     "firmware": ({"manufacturer", "firmware"}, {"model"}),
 }
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_KEY = re.compile(r"^\d+(#\d+)?(\.[A-Za-z_][A-Za-z0-9_]*(\[(\d+|\*)\])?)+$")
+_KEY = re.compile(r"^(\d+(#\d+)?|raw)(\.[A-Za-z_][A-Za-z0-9_]*(\[(\d+|\*)\])?)+$")
 
 
 class QuirkError(ValueError):
@@ -109,6 +111,7 @@ class QuirkSet:
     source: str
     quirks: tuple[Quirk, ...]
     path: str
+    readings: tuple[RawReading, ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> QuirkSet:
@@ -123,7 +126,7 @@ class QuirkSet:
     @classmethod
     def from_json(cls, data: Any, path: str = "<data>") -> QuirkSet:
         _object(data, "quirk set", {"format", "version", "id", "layer", "match", "source"},
-                {"quirks", "description"})  # fmt: skip
+                {"quirks", "readings", "description"})  # fmt: skip
         if data["format"] != FORMAT or data["version"] != VERSION:
             raise QuirkError(f"format must be {FORMAT!r} version {VERSION}")
         set_id = _id(data["id"], "set id")
@@ -133,7 +136,16 @@ class QuirkSet:
         source = _text(data["source"], "source")
         match = _match(layer, data["match"])
         quirks = tuple(_quirk(q, layer, set_id, source) for q in data.get("quirks", []))
-        return cls(set_id, layer, match, source, quirks, path)
+        try:
+            readings = tuple(
+                parse_reading(r, layer, set_id, source) for r in data.get("readings", [])
+            )
+        except RawReadingError as err:
+            raise QuirkError(str(err)) from err
+        for name, same in by_name(readings).items():
+            if len(same) > 1:
+                raise QuirkError(f"reading name {name!r} is used twice in one set")
+        return cls(set_id, layer, match, source, quirks, path, readings)
 
 
 def _object(data: Any, what: str, required: set[str], optional: set[str]) -> None:
@@ -232,7 +244,7 @@ def _quirk(data: Any, layer: str, set_id: str, source: str) -> Quirk:
 def load_sets(paths: Iterable[Path]) -> list[QuirkSet]:
     """Load quirk-set files; a directory loads its ``*.json`` files in name order.
 
-    Duplicate set or quirk ids are refused.
+    Duplicate set ids, and quirk or reading ids used twice anywhere, are refused.
     """
     files: list[Path] = []
     for path in paths:
@@ -245,10 +257,10 @@ def load_sets(paths: Iterable[Path]) -> list[QuirkSet]:
         if quirk_set.id in seen_sets:
             raise QuirkError(f"{quirk_set.path}: set id {quirk_set.id!r} is used twice")
         seen_sets.add(quirk_set.id)
-        for quirk in quirk_set.quirks:
-            if quirk.id in seen_quirks:
-                raise QuirkError(f"{quirk_set.path}: quirk id {quirk.id!r} is used twice")
-            seen_quirks.add(quirk.id)
+        for item in (*quirk_set.quirks, *quirk_set.readings):
+            if item.id in seen_quirks:
+                raise QuirkError(f"{quirk_set.path}: quirk id {item.id!r} is used twice")
+            seen_quirks.add(item.id)
     return sets
 
 
@@ -268,7 +280,7 @@ class ActiveQuirks:
         disabled: Iterable[str] = (),
     ) -> None:
         self.disabled = frozenset(disabled)
-        known = {q.id for s in sets for q in s.quirks}
+        known = {q.id for s in sets for q in (*s.quirks, *s.readings)}
         unknown = self.disabled - known
         if unknown:
             raise QuirkError(f"cannot switch off unknown quirk id(s) {', '.join(sorted(unknown))}")
@@ -282,6 +294,23 @@ class ActiveQuirks:
         self.effective: set[str] = set()
         """Quirks that supply at least one change to a point (not wholly overridden)."""
         self._effects: dict[str, _Effect] = {}
+        self.all_readings = [r for s in self.sets for r in s.readings]
+        self.readings: list[RawReading] = []
+        """The reading used for each name: the highest layer that is not switched off."""
+        self.reading_clashes: dict[str, list[RawReading]] = {}
+        """Names with two readings in their top layer; their points have no value."""
+        self.read_errors: dict[str, str] = {}
+        """The last read error of each reading, cleared when it reads again."""
+        switched_on = [r for r in self.all_readings if r.id not in self.disabled]
+        for name, same in by_name(switched_on).items():
+            top = [r for r in same if r.layer == same[-1].layer]
+            if len(top) > 1:
+                self.reading_clashes[name] = top
+                for reading in top:
+                    others = ", ".join(r.id for r in top if r is not reading)
+                    self._fail(reading.id, f"clashes with {others} on raw.{name} (same layer)")
+            else:
+                self.readings.append(top[0])
         for quirk_set in self.sets:
             _LOGGER.info(
                 "Quirk set %s (%s layer) applies; source: %s",
@@ -292,6 +321,13 @@ class ActiveQuirks:
             _LOGGER.info(
                 "Quirk %s on %s %s: %s (%s); source: %s",
                 quirk.id, quirk.point, state, _describe(quirk.changes), quirk.reason, quirk.source,
+            )  # fmt: skip
+        for reading in self.all_readings:
+            state = "switched off" if reading.id in self.disabled else "active"
+            _LOGGER.info(
+                "Reading %s (%s) %s: %s %s at %d (%s); source: %s",
+                reading.id, reading.key, state, reading.table, reading.type, reading.address,
+                reading.reason, reading.source,
             )  # fmt: skip
         for quirk_set in self.not_matched:
             _LOGGER.info("Quirk set %s does not match this device", quirk_set.id)
@@ -353,7 +389,7 @@ class ActiveQuirks:
             value=value,
             units=change("units", state.units),
             label=change("label", state.label),
-            quirks=tuple(sorted({q.id for q in effect.changes.values()})),
+            quirks=tuple(sorted({*state.quirks, *(q.id for q in effect.changes.values())})),
         )
 
     def state_of(self, quirk: Quirk) -> str:
@@ -366,6 +402,56 @@ class ActiveQuirks:
         if quirk.id in self.used:
             return "overridden"  # every change it makes is replaced by a higher layer
         return "unused"
+
+    def raw_states(self, results: Mapping[str, RawResult]) -> list[PointState]:
+        """Point states for the readings in use, before point quirks."""
+        from .poller import PointState
+
+        for reading in self.readings:
+            result = results.get(reading.id)
+            error = None if result is None else result.error
+            if error is None:
+                self.read_errors.pop(reading.id, None)
+            elif self.read_errors.get(reading.id) != error:
+                self.read_errors[reading.id] = error
+                _LOGGER.warning("Reading %s not read: %s", reading.id, error)
+        states = [
+            PointState(
+                key=reading.key,
+                name=reading.name,
+                label=reading.label,
+                units=reading.units,
+                writable=False,
+                value=None if reading.id not in results else results[reading.id].value,
+                sunspec_type=reading.type,
+                quirks=(reading.id,),
+            )
+            for reading in self.readings
+        ]
+        for name, same in self.reading_clashes.items():
+            first = same[0]
+            states.append(
+                PointState(
+                    f"raw.{name}",
+                    name,
+                    first.label,
+                    first.units,
+                    False,
+                    None,
+                    first.type,
+                    tuple(r.id for r in same),
+                )  # fmt: skip
+            )
+        return states
+
+    def reading_state(self, reading: RawReading) -> str:
+        if reading.id in self.disabled:
+            return "off"
+        if reading.id in self.failing or reading.id in self.read_errors:
+            return "failing"
+        if reading in self.readings:
+            return "active"
+        return "overridden"
 
     def report(self) -> dict[str, Any]:
         """Every quirk of the matching sets with its state, for the API."""
@@ -387,6 +473,14 @@ class ActiveQuirks:
                     "error": self.failing.get(q.id),
                 }
                 for q in self.quirks
+            ],
+            "readings": [
+                {
+                    **r.describe(),
+                    "state": self.reading_state(r),
+                    "error": self.failing.get(r.id) or self.read_errors.get(r.id),
+                }
+                for r in self.all_readings
             ],
             "not_matched": [s.id for s in self.not_matched],
         }

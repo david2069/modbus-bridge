@@ -18,6 +18,7 @@ from modbus_connection.model.sunspec import SunSpecModel
 from .implemented import ImplementedPoints
 from .points import ModelReading, read_chain
 from .quirks import ActiveQuirks
+from .raw import read_raw
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,8 +73,10 @@ class Poller:
 
     async def poll(self) -> list[PointState]:
         """Read the chain once. Return the states that changed, in key order."""
+        raw_readings = [] if self.quirks is None else self.quirks.readings
         try:
             readings = await read_chain(self._unit, self._chain)
+            raw = await read_raw(self._unit, raw_readings) if raw_readings else {}
         except ModbusError as err:
             self.last_error = f"{type(err).__name__}: {err}"
             _LOGGER.warning("Poll failed, all points unavailable: %s", self.last_error)
@@ -84,7 +87,13 @@ class Poller:
         for reading in readings:
             if reading.error is not None:
                 _LOGGER.warning("Model %s not read: %s", reading.prefix, reading.error)
-        return self._apply(self._states(readings), failed_models=failed)
+        states = self._states(readings)
+        if self.quirks is not None:
+            for state in self.quirks.raw_states(raw):
+                changed = self.quirks.apply(state)
+                if changed is not None:
+                    states[state.key] = changed
+        return self._apply(states, failed_models=failed)
 
     def _states(self, readings: Sequence[ModelReading]) -> dict[str, PointState]:
         hidden = self._implemented.not_implemented
