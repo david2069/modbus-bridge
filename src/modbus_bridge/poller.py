@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -36,6 +36,8 @@ class PointState:
     sunspec_type: str | None = None
     quirks: tuple[str, ...] = ()
     """Ids of the quirks applied to this point."""
+    trace: Mapping[str, Any] | None = field(default=None, compare=False)
+    """For a rule's output: the rule, its inputs and the constants used."""
 
     @property
     def available(self) -> bool:
@@ -90,6 +92,10 @@ class Poller:
         states = self._states(readings)
         if self.quirks is not None:
             for state in self.quirks.raw_states(raw):
+                changed = self.quirks.apply(state)
+                if changed is not None:
+                    states[state.key] = changed
+            for state in self.quirks.engine.evaluate(states):
                 changed = self.quirks.apply(state)
                 if changed is not None:
                     states[state.key] = changed

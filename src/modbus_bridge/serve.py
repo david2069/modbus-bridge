@@ -26,7 +26,7 @@ from modbus_connection.tmodbus import ModbusConnection
 
 from .api import create_app
 from .pics import PicsProfile
-from .quirks import QuirkError, load_sets
+from .quirks import QuirkError, check_off, load_sets
 from .service import DeviceService
 
 
@@ -34,10 +34,7 @@ def build(args: argparse.Namespace) -> FastAPI:
     tokens = [line.strip() for line in args.token_file.read_text().splitlines() if line.strip()]
     profile = PicsProfile.load(args.pics) if args.pics else None
     quirk_sets = load_sets(args.quirks)
-    known = {quirk.id for quirk_set in quirk_sets for quirk in quirk_set.quirks}
-    unknown = sorted(set(args.quirk_off) - known)
-    if unknown:
-        raise QuirkError(f"cannot switch off unknown quirk id(s) {', '.join(unknown)}")
+    check_off(quirk_sets, args.quirk_off)
     connection = ModbusConnection(
         ModbusTcpParams(host=args.device_host, port=args.device_port), timeout=args.timeout
     )

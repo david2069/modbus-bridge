@@ -19,6 +19,15 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .evaluator import (
+    Constant,
+    Rule,
+    RuleEngine,
+    RuleError,
+    find_loop,
+    parse_constant,
+    parse_rule,
+)
 from .raw import RawReading, RawReadingError, RawResult, by_name, parse_reading
 
 if TYPE_CHECKING:
@@ -39,7 +48,7 @@ _MATCH_FIELDS = {
     "firmware": ({"manufacturer", "firmware"}, {"model"}),
 }
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_KEY = re.compile(r"^(\d+(#\d+)?|raw)(\.[A-Za-z_][A-Za-z0-9_]*(\[(\d+|\*)\])?)+$")
+_KEY = re.compile(r"^(\d+(#\d+)?|raw|label)(\.[A-Za-z_][A-Za-z0-9_]*(\[(\d+|\*)\])?)+$")
 
 
 class QuirkError(ValueError):
@@ -112,6 +121,13 @@ class QuirkSet:
     quirks: tuple[Quirk, ...]
     path: str
     readings: tuple[RawReading, ...] = ()
+    constants: tuple[Constant, ...] = ()
+    rules: tuple[Rule, ...] = ()
+
+    @property
+    def items(self) -> tuple[Any, ...]:
+        """Everything in the set that has an id."""
+        return (*self.quirks, *self.readings, *self.constants, *self.rules)
 
     @classmethod
     def load(cls, path: Path) -> QuirkSet:
@@ -126,7 +142,7 @@ class QuirkSet:
     @classmethod
     def from_json(cls, data: Any, path: str = "<data>") -> QuirkSet:
         _object(data, "quirk set", {"format", "version", "id", "layer", "match", "source"},
-                {"quirks", "readings", "description"})  # fmt: skip
+                {"quirks", "readings", "constants", "rules", "description"})  # fmt: skip
         if data["format"] != FORMAT or data["version"] != VERSION:
             raise QuirkError(f"format must be {FORMAT!r} version {VERSION}")
         set_id = _id(data["id"], "set id")
@@ -145,7 +161,24 @@ class QuirkSet:
         for name, same in by_name(readings).items():
             if len(same) > 1:
                 raise QuirkError(f"reading name {name!r} is used twice in one set")
-        return cls(set_id, layer, match, source, quirks, path, readings)
+        try:
+            constants = tuple(
+                parse_constant(c, layer, set_id, source) for c in data.get("constants", [])
+            )
+            rules = tuple(parse_rule(r, layer, set_id, source, _KEY) for r in data.get("rules", []))
+        except RuleError as err:
+            raise QuirkError(str(err)) from err
+        for what, names in (
+            ("constant name", [c.name for c in constants]),
+            ("rule output", [r.output for r in rules]),
+        ):
+            twice = sorted({n for n in names if names.count(n) > 1})
+            if twice:
+                raise QuirkError(f"{what} {twice[0]!r} is used twice in one set")
+        loop = find_loop(rules)
+        if loop:
+            raise QuirkError(f"rules form a loop: {' -> '.join(loop + loop[:1])}")
+        return cls(set_id, layer, match, source, quirks, path, readings, constants, rules)
 
 
 def _object(data: Any, what: str, required: set[str], optional: set[str]) -> None:
@@ -257,11 +290,19 @@ def load_sets(paths: Iterable[Path]) -> list[QuirkSet]:
         if quirk_set.id in seen_sets:
             raise QuirkError(f"{quirk_set.path}: set id {quirk_set.id!r} is used twice")
         seen_sets.add(quirk_set.id)
-        for item in (*quirk_set.quirks, *quirk_set.readings):
+        for item in quirk_set.items:
             if item.id in seen_quirks:
                 raise QuirkError(f"{quirk_set.path}: quirk id {item.id!r} is used twice")
             seen_quirks.add(item.id)
     return sets
+
+
+def check_off(sets: Sequence[QuirkSet], ids: Iterable[str]) -> None:
+    """Refuse ids to switch off that no set defines (quirk, reading, constant or rule)."""
+    known = {item.id for quirk_set in sets for item in quirk_set.items}
+    unknown = sorted(set(ids) - known)
+    if unknown:
+        raise QuirkError(f"cannot switch off unknown quirk id(s) {', '.join(unknown)}")
 
 
 @dataclass
@@ -280,10 +321,7 @@ class ActiveQuirks:
         disabled: Iterable[str] = (),
     ) -> None:
         self.disabled = frozenset(disabled)
-        known = {q.id for s in sets for q in (*s.quirks, *s.readings)}
-        unknown = self.disabled - known
-        if unknown:
-            raise QuirkError(f"cannot switch off unknown quirk id(s) {', '.join(sorted(unknown))}")
+        check_off(sets, self.disabled)
         matched = [s for s in sets if s.match.accepts(identity)]
         self.sets = sorted(matched, key=lambda s: LAYERS.index(s.layer))
         self.not_matched = [s for s in sets if s not in matched]
@@ -321,6 +359,21 @@ class ActiveQuirks:
             _LOGGER.info(
                 "Quirk %s on %s %s: %s (%s); source: %s",
                 quirk.id, quirk.point, state, _describe(quirk.changes), quirk.reason, quirk.source,
+            )  # fmt: skip
+        self.engine = RuleEngine(
+            [c for s in self.sets for c in s.constants],
+            [r for s in self.sets for r in s.rules],
+            self.disabled,
+            self._fail,
+        )
+        for item in (*self.engine.all_constants, *self.engine.all_rules):
+            _LOGGER.info(
+                "%s %s (%s) %s: %s (%s); source: %s",
+                "Constant" if isinstance(item, Constant) else "Rule", item.id,
+                f"{item.name} = {item.value}" if isinstance(item, Constant) else item.key,
+                "switched off" if item.id in self.disabled else "active",
+                item.formula.text if isinstance(item, Rule) else item.units,
+                item.reason, item.source,
             )  # fmt: skip
         for reading in self.all_readings:
             state = "switched off" if reading.id in self.disabled else "active"
@@ -481,6 +534,22 @@ class ActiveQuirks:
                     "error": self.failing.get(r.id) or self.read_errors.get(r.id),
                 }
                 for r in self.all_readings
+            ],
+            "constants": [
+                {
+                    **c.describe(),
+                    "state": self.engine.state_of(c, self.failing),
+                    "error": self.failing.get(c.id),
+                }
+                for c in self.engine.all_constants
+            ],
+            "rules": [
+                {
+                    **r.describe(),
+                    "state": self.engine.state_of(r, self.failing),
+                    "error": self.failing.get(r.id) or self.engine.errors.get(r.id),
+                }
+                for r in self.engine.all_rules
             ],
             "not_matched": [s.id for s in self.not_matched],
         }

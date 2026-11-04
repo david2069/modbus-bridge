@@ -53,6 +53,7 @@ def point_json(state: PointState) -> dict[str, Any]:
         "value": json_value(state.value),
         "available": state.available,
         "quirks": list(state.quirks),
+        **({"trace": state.trace} if state.trace is not None else {}),
     }
 
 
