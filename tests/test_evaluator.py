@@ -321,7 +321,7 @@ def test_serve_accepts_off_for_every_kind_of_id(tmp_path) -> None:
     args = argparse.Namespace(
         token_file=tmp_path / "token", pics=None, quirks=[tmp_path / "set.json"],
         quirk_off=["rule-1", "const-1", "quirk-1", "read-1"], device_host="192.0.2.10",
-        device_port=502, timeout=1.0, device_id=None, unit=1, interval=5.0,
+        device_port=502, timeout=1.0, device_id=None, unit=1, interval=5.0, user_quirks=None,
     )  # fmt: skip
     build(args)  # no error
     args.quirk_off = ["nope"]

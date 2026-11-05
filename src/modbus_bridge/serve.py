@@ -3,7 +3,7 @@
 Usage:
     python -m modbus_bridge.serve --device-host 192.0.2.10 --device-port 502 --unit 1
         --token-file PATH [--pics PROFILE.json] [--interval 5]
-        [--quirks FILE_OR_DIR ...] [--quirk-off ID ...]
+        [--quirks FILE_OR_DIR ...] [--quirk-off ID ...] [--user-quirks DIR]
         [--listen-host 127.0.0.1] [--listen-port 8080] [--device-id unit1]
 
 The API token is read from a file, never from the command line, so it does not
@@ -26,8 +26,9 @@ from modbus_connection.tmodbus import ModbusConnection
 
 from .api import create_app
 from .pics import PicsProfile
-from .quirks import QuirkError, check_off, load_sets
+from .quirks import QuirkError, check_off, check_unique, load_sets
 from .service import DeviceService
+from .user_quirks import UserQuirkStore
 
 
 def build(args: argparse.Namespace) -> FastAPI:
@@ -38,13 +39,21 @@ def build(args: argparse.Namespace) -> FastAPI:
     connection = ModbusConnection(
         ModbusTcpParams(host=args.device_host, port=args.device_port), timeout=args.timeout
     )
+    device_id = args.device_id or f"unit{args.unit}"
+    user_store = None
+    if args.user_quirks is not None:
+        # Check the saved user quirks now, so a bad file stops start-up with a clear error.
+        user_store = UserQuirkStore(args.user_quirks, device_id)
+        user_set = user_store.load().quirk_set(device_id, "any")
+        check_unique([*quirk_sets, *([user_set] if user_set else [])])
     service = DeviceService(
-        args.device_id or f"unit{args.unit}",
+        device_id,
         connection.for_unit(args.unit),
         interval=args.interval,
         profile=profile,
         quirk_sets=quirk_sets,
         quirks_off=args.quirk_off,
+        user_store=user_store,
     )
 
     @asynccontextmanager
@@ -78,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--quirk-off", action="append", default=[], metavar="ID",
         help="switch off the quirk with this id (repeatable)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--user-quirks", type=Path, metavar="DIR",
+        help="directory for the user's own quirks, one file per device (off if not given)",
     )  # fmt: skip
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=8080)

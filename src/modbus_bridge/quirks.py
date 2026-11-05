@@ -1,6 +1,7 @@
-"""Quirk sets: corrections to SunSpec points, held as data (design L2–L4, rule 9).
+"""Quirk sets: corrections to SunSpec points, held as data (design L2–L5, rule 9).
 
-A quirk-set file names one layer (vendor, model or firmware), the Model 1 values
+A quirk-set file names one layer (vendor, model or firmware; the user layer is
+kept for the user's own quirks, see ``user_quirks``), the Model 1 values
 it matches, its source, and its quirks. Each quirk changes one point (or a
 pattern of points): scale, invert, units, label or hide. Higher layers override
 lower ones change by change. Every quirk can be switched off by its id; the point
@@ -39,13 +40,16 @@ _LOGGER = logging.getLogger(__name__)
 FORMAT = "modbus-bridge/quirk-set"
 VERSION = 1
 #: Layers in the order they apply, lowest first (design L2–L4).
-LAYERS = ("vendor", "model", "firmware")
+LAYERS = ("vendor", "model", "firmware", "user")
+#: The layer kept for the user's own quirks (design L5, 2b); shipped files may not use it.
+USER_LAYER = "user"
 CHANGES = ("scale", "invert", "units", "label", "hide")
 
 _MATCH_FIELDS = {
     "vendor": ({"manufacturer"}, set()),
     "model": ({"manufacturer", "model"}, {"options"}),
     "firmware": ({"manufacturer", "firmware"}, {"model"}),
+    "user": ({"manufacturer"}, set()),
 }
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _KEY = re.compile(r"^(\d+(#\d+)?|raw|label)(\.[A-Za-z_][A-Za-z0-9_]*(\[(\d+|\*)\])?)+$")
@@ -284,6 +288,17 @@ def load_sets(paths: Iterable[Path]) -> list[QuirkSet]:
         path = Path(path)
         files += sorted(path.glob("*.json")) if path.is_dir() else [path]
     sets = [QuirkSet.load(f) for f in files]
+    for quirk_set in sets:
+        if quirk_set.layer == USER_LAYER:
+            raise QuirkError(
+                f"{quirk_set.path}: the {USER_LAYER} layer is only for the user's own quirks"
+            )
+    check_unique(sets)
+    return sets
+
+
+def check_unique(sets: Sequence[QuirkSet]) -> None:
+    """Refuse a set id, or an item id (quirk, reading, constant or rule), used twice."""
     seen_sets: set[str] = set()
     seen_quirks: set[str] = set()
     for quirk_set in sets:
@@ -294,7 +309,6 @@ def load_sets(paths: Iterable[Path]) -> list[QuirkSet]:
             if item.id in seen_quirks:
                 raise QuirkError(f"{quirk_set.path}: quirk id {item.id!r} is used twice")
             seen_quirks.add(item.id)
-    return sets
 
 
 def check_off(sets: Sequence[QuirkSet], ids: Iterable[str]) -> None:

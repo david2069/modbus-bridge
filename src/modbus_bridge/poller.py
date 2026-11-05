@@ -18,7 +18,7 @@ from modbus_connection.model.sunspec import SunSpecModel
 from .implemented import ImplementedPoints
 from .points import ModelReading, read_chain
 from .quirks import ActiveQuirks
-from .raw import read_raw
+from .raw import RawResult, read_raw
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +68,8 @@ class Poller:
         self._implemented = implemented
         self._snapshot: dict[str, PointState] = {}
         self.last_error: str | None = None
+        self._last_readings: list[ModelReading] = []
+        self._last_raw: dict[str, RawResult] = {}
 
     @property
     def implemented(self) -> ImplementedPoints:
@@ -79,7 +81,8 @@ class Poller:
 
     async def poll(self) -> list[PointState]:
         """Read the chain once. Return the states that changed, in key order."""
-        raw_readings = [] if self.quirks is None else self.quirks.readings
+        quirks = self.quirks  # the same quirks for the whole poll, even if replaced meanwhile
+        raw_readings = [] if quirks is None else quirks.readings
         try:
             readings = await read_chain(self._unit, self._chain)
             raw = await read_raw(self._unit, raw_readings) if raw_readings else {}
@@ -93,19 +96,37 @@ class Poller:
         for reading in readings:
             if reading.error is not None:
                 _LOGGER.warning("Model %s not read: %s", reading.prefix, reading.error)
-        states = self._states(readings)
-        if self.quirks is not None:
-            for state in self.quirks.raw_states(raw):
-                changed = self.quirks.apply(state)
-                if changed is not None:
-                    states[state.key] = changed
-            for state in self.quirks.engine.evaluate(states):
-                changed = self.quirks.apply(state)
-                if changed is not None:
-                    states[state.key] = changed
-        return self._apply(states, failed_models=failed)
+        self._last_readings, self._last_raw = list(readings), dict(raw)
+        return self._apply(self._build(readings, raw, quirks), failed_models=failed)
 
-    def _states(self, readings: Sequence[ModelReading]) -> dict[str, PointState]:
+    def preview(
+        self, quirks: ActiveQuirks, extra_raw: Mapping[str, RawResult] | None = None
+    ) -> dict[str, PointState]:
+        """The points the last poll would have given with other quirks. Nothing is read."""
+        raw = {**self._last_raw, **(extra_raw or {})}
+        return self._build(self._last_readings, raw, quirks)
+
+    def _build(
+        self,
+        readings: Sequence[ModelReading],
+        raw: Mapping[str, RawResult],
+        quirks: ActiveQuirks | None,
+    ) -> dict[str, PointState]:
+        states = self._states(readings, quirks)
+        if quirks is not None:
+            for state in quirks.raw_states(raw):
+                changed = quirks.apply(state)
+                if changed is not None:
+                    states[state.key] = changed
+            for state in quirks.engine.evaluate(states):
+                changed = quirks.apply(state)
+                if changed is not None:
+                    states[state.key] = changed
+        return states
+
+    def _states(
+        self, readings: Sequence[ModelReading], quirks: ActiveQuirks | None
+    ) -> dict[str, PointState]:
         hidden = self._implemented.not_implemented
         states = {
             point.key: PointState(
@@ -121,11 +142,11 @@ class Poller:
             for point in reading.points
             if point.key not in hidden
         }
-        if self.quirks is None:
+        if quirks is None:
             return states
         result: dict[str, PointState] = {}
         for key, state in states.items():
-            changed = self.quirks.apply(state)
+            changed = quirks.apply(state)
             if changed is not None:
                 result[key] = changed
         return result

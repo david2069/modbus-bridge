@@ -1,6 +1,7 @@
 """The REST API (design D7, D9, D12): versioned paths, API tokens, snapshot and events.
 
-There are no writes here (D10).
+There are no writes to devices here (D10). The user's own quirks (design 2b) are
+created, checked, previewed, removed and switched off here.
 """
 
 from __future__ import annotations
@@ -9,12 +10,13 @@ import asyncio
 import hmac
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .service import DeviceService, point_json
+from .quirks import QuirkError
+from .service import DeviceService, UserQuirksOff, point_json
 
 PREFIX = "/api/v1"
 #: Seconds between keep-alive comments on an idle event stream.
@@ -119,6 +121,61 @@ def create_app(
         if service.quirks is None:
             raise HTTPException(status_code=503, detail=f"Device {device_id!r} is not ready")
         return {"device": service.device_id, **service.quirks.report()}
+
+    def ready(device_id: str) -> DeviceService:
+        service = get_service(device_id)
+        if service.quirks is None:
+            raise HTTPException(status_code=503, detail=f"Device {device_id!r} is not ready")
+        return service
+
+    async def edit(call: Any) -> Any:
+        """Run a user-quirk change, turning its refusals into HTTP answers."""
+        try:
+            return await call
+        except UserQuirksOff as err:
+            raise HTTPException(status_code=409, detail=str(err)) from err
+        except QuirkError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+
+    user_path = f"{PREFIX}/devices/{{device_id}}/user-quirks"
+
+    @app.get(user_path, dependencies=auth)
+    async def user_quirks(device_id: str) -> dict[str, Any]:
+        return ready(device_id).user_json()
+
+    @app.post(f"{user_path}/check", dependencies=auth)
+    async def check_user_quirk(device_id: str, body: Annotated[Any, Body()]) -> dict[str, Any]:
+        if not isinstance(body, dict) or set(body) != {"kind", "item"}:
+            raise HTTPException(status_code=422, detail="body must be {kind, item}")
+        service = ready(device_id)
+        _, _, preview = await edit(service.check_user_item(body["kind"], body["item"]))
+        return preview
+
+    @app.put(f"{user_path}/{{kind}}/{{item_id}}", dependencies=auth)
+    async def save_user_quirk(
+        device_id: str, kind: str, item_id: str, item: Annotated[Any, Body()]
+    ) -> dict[str, Any]:
+        if not isinstance(item, dict) or item.get("id") != item_id:
+            raise HTTPException(status_code=422, detail="the item's id must match the path")
+        return await edit(ready(device_id).save_user_item(kind, item))
+
+    @app.delete(f"{user_path}/{{kind}}/{{item_id}}", dependencies=auth)
+    async def remove_user_quirk(device_id: str, kind: str, item_id: str) -> dict[str, str]:
+        try:
+            await edit(ready(device_id).remove_user_item(kind, item_id))
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=f"No user {kind} {item_id!r}") from err
+        return {"removed": item_id}
+
+    @app.put(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off", dependencies=auth)
+    async def switch_off(device_id: str, item_id: str) -> dict[str, Any]:
+        await edit(ready(device_id).switch_off(item_id, True))
+        return {"id": item_id, "off": True}
+
+    @app.delete(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off", dependencies=auth)
+    async def switch_on(device_id: str, item_id: str) -> dict[str, Any]:
+        await edit(ready(device_id).switch_off(item_id, False))
+        return {"id": item_id, "off": False}
 
     @app.get(f"{PREFIX}/devices/{{device_id}}/events", dependencies=auth)
     async def events(device_id: str) -> StreamingResponse:
