@@ -101,6 +101,17 @@ class Poller:
         self._last_readings, self._last_raw = list(readings), dict(raw)
         return self._apply(self._build(readings, raw, quirks), failed_models=failed)
 
+    def fail(self, reason: str) -> list[PointState]:
+        """Make every point unavailable without reading, for ``reason``."""
+        self.last_error = reason
+        return self._apply({}, failed_models=None)
+
+    def rebind(self, chain: Sequence[SunSpecModel], implemented: ImplementedPoints) -> None:
+        """Read another model chain from the next poll (the device changed)."""
+        self._chain = list(chain)
+        self._implemented = implemented
+        self._last_readings, self._last_raw = [], {}
+
     def preview(
         self, quirks: ActiveQuirks, extra_raw: Mapping[str, RawResult] | None = None
     ) -> dict[str, PointState]:

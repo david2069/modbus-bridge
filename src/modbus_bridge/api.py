@@ -263,4 +263,5 @@ def _summary(service: DeviceService) -> dict[str, Any]:
         summary["implemented_points"] = len(service.implemented.implemented)
         summary["implemented_source"] = service.implemented.source
         summary["last_error"] = service.poller.last_error
+    summary["refused"] = service.refused
     return summary

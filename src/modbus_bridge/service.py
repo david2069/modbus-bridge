@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 from enum import Enum, Flag
 from typing import Any
 
-from modbus_connection import ModbusUnit
+from modbus_connection import ModbusError, ModbusUnit
+from modbus_connection.model.sunspec import SunSpecError
 
 from .implemented import ImplementedPoints, discover_implemented
 from .pics import PicsProfile, apply_pics
@@ -23,7 +24,7 @@ from .quirks import FORMAT as SET_FORMAT
 from .quirks import VERSION as SET_VERSION
 from .quirks import ActiveQuirks, QuirkError, QuirkSet, check_off, check_unique
 from .raw import read_raw
-from .sunspec import SunSpecDevice, discover
+from .sunspec import DeviceIdentity, SunSpecDevice, discover
 from .user_quirks import KINDS, SOURCE, AuditLog, UserQuirks, UserQuirkStore, check_kind
 
 _LOGGER = logging.getLogger(__name__)
@@ -129,6 +130,19 @@ def _warnings(changes: Sequence[Mapping[str, Any]]) -> list[str]:
     return warnings
 
 
+def _who(identity: DeviceIdentity) -> tuple[str | None, str | None, str | None]:
+    """What makes a device the same device: maker, model and serial."""
+    return identity.manufacturer, identity.model, identity.serial
+
+
+def _describe(identity: DeviceIdentity) -> str:
+    return " ".join(str(x) for x in _who(identity) if x) or "no Model 1 identity"
+
+
+def _layout(device: SunSpecDevice) -> tuple[Any, ...]:
+    return device.base_address, tuple((m.model_id, m.address, m.length) for m in device.chain)
+
+
 class DeviceService:
     """Discover one unit, then poll it on a timer and tell subscribers what changed."""
 
@@ -164,6 +178,13 @@ class DeviceService:
         self.sequence = 0
         self._subscribers: set[asyncio.Queue[Update | None]] = set()
         self._task: asyncio.Task[None] | None = None
+        self._recheck = False
+        """Set when the link may have been rebuilt: check the device before the next poll."""
+        self._check_failing = False
+        """The last check could not read the device (its warning was logged)."""
+        self.refused: str | None = None
+        """Why another device at this address is not read, once one was found."""
+        self._unsubscribe_lost: Callable[[], None] | None = None
 
     @property
     def implemented(self) -> ImplementedPoints:
@@ -174,29 +195,96 @@ class DeviceService:
     async def setup(self) -> None:
         """Discover the device and its implemented points, then poll once."""
         self.device = await discover(self._unit)
-        # Model 1 is read on every connect, so a new firmware picks its quirks here.
+        if not self.device.identity.serial:
+            _LOGGER.warning(
+                "Device %s has no Model 1 serial: after a reconnect, another device of the "
+                "same model at this address cannot be told apart", self.device_id,
+            )  # fmt: skip
         if self.user_store is not None:
             self.user = self.user_store.load()
             self.user_store.audit.load()
         self.quirks = self._build(self.user)
+        implemented = await self._implemented(self.device)
+        self.poller = Poller(self._unit, self.device.chain, implemented, self.quirks)
+        self._unsubscribe_lost = self._unit.on_connection_lost(self._connection_lost)
+        await self.poll_once()
+
+    async def _implemented(self, device: SunSpecDevice) -> ImplementedPoints:
         implemented, _ = await discover_implemented(
-            self._unit, self.device.chain, self._reads, self._read_interval
+            self._unit, device.chain, self._reads, self._read_interval
         )
         if self._profile is not None:
             implemented, _ = apply_pics(implemented, self._profile)
-        self.poller = Poller(self._unit, self.device.chain, implemented, self.quirks)
-        await self.poll_once()
+        return implemented
+
+    def _connection_lost(self) -> None:
+        self._recheck = True
 
     async def poll_once(self) -> list[PointState]:
         if self.poller is None:
             raise RuntimeError("service not started")
+        problem = None
+        if self._recheck and self.refused is None:
+            # Edit lock first, as an edit takes it before the poll lock.
+            async with self._edit_lock, self._poll_lock:
+                problem = await self._recheck_device()
         async with self._poll_lock:
-            changes = await self.poller.poll()
+            if self.refused is not None:
+                changes = self.poller.fail(self.refused)
+            elif problem is not None:
+                changes = self.poller.fail(problem)
+            else:
+                changes = await self.poller.poll()
+                if self.poller.last_error is not None:
+                    self._recheck = True  # the link may have gone; check before trusting it
             removed = list(self.poller.removed)
         if changes or removed:
             self.sequence += 1
             self._publish(self.sequence, changes, removed)
         return changes
+
+    async def _recheck_device(self) -> str | None:
+        """Read SunSpec and Model 1 again after a reconnect (design Q3, rule 8).
+
+        Returns why the device could not be checked, or ``None``. Refuses another
+        device; sets the same device up again if its firmware, options or chain changed.
+        """
+        assert self.device is not None and self.poller is not None
+        try:
+            found = await discover(self._unit)
+        except (ModbusError, SunSpecError) as err:
+            problem = f"not checked after a reconnect: {type(err).__name__}: {err}"
+            # Once per outage at WARNING; the retries at every poll only at DEBUG.
+            level = logging.DEBUG if self._check_failing else logging.WARNING
+            _LOGGER.log(level, "Device %s %s; all points unavailable", self.device_id, problem)
+            self._check_failing = True
+            return problem
+        self._recheck = False
+        self._check_failing = False
+        old, new = self.device.identity, found.identity
+        if _who(old) != _who(new):
+            self.refused = (
+                f"another device answers at this address: it reports {_describe(new)}, "
+                f"but this bridge was started for {_describe(old)}. "
+                "It is not read again until the bridge is restarted"
+            )
+            _LOGGER.error("Device %s refused: %s", self.device_id, self.refused)
+            return None
+        chain_changed = _layout(found) != _layout(self.device)
+        if old == new and not chain_changed:
+            _LOGGER.info("Device %s checked after a reconnect: unchanged", self.device_id)
+            return None
+        _LOGGER.warning(
+            "Device %s changed after a reconnect: firmware %s -> %s, options %s -> %s%s; "
+            "quirks rebuilt", self.device_id, old.version, new.version, old.options,
+            new.options, ", model chain changed" if chain_changed else "",
+        )  # fmt: skip
+        self.device = found
+        self.quirks = self._build(self.user)
+        self.poller.quirks = self.quirks
+        if chain_changed:
+            self.poller.rebind(found.chain, await self._implemented(found))
+        return None
 
     def _build(self, user: UserQuirks) -> ActiveQuirks:
         """The device's quirks: shipped sets, then the user's, with both off lists."""
@@ -433,6 +521,9 @@ class DeviceService:
         self._task = asyncio.create_task(self._run(), name=f"poll {self.device_id}")
 
     async def stop(self) -> None:
+        if self._unsubscribe_lost is not None:
+            self._unsubscribe_lost()
+            self._unsubscribe_lost = None
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
