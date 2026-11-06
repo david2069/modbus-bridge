@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum, Flag
 from typing import Any
 
@@ -21,7 +21,7 @@ from .poller import PointState, Poller
 from .quirks import ActiveQuirks, QuirkError, QuirkSet, check_off, check_unique
 from .raw import read_raw
 from .sunspec import SunSpecDevice, discover
-from .user_quirks import KINDS, UserQuirks, UserQuirkStore, check_kind
+from .user_quirks import KINDS, AuditLog, UserQuirks, UserQuirkStore, check_kind
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +63,10 @@ def point_json(state: PointState) -> dict[str, Any]:
 
 class UserQuirksOff(RuntimeError):
     """The bridge was started without ``--user-quirks``."""
+
+
+class AuditError(RuntimeError):
+    """A change could not be added to the audit log, so it was not made."""
 
 
 def _view(state: PointState | None) -> dict[str, Any] | None:
@@ -136,6 +140,7 @@ class DeviceService:
         # Model 1 is read on every connect, so a new firmware picks its quirks here.
         if self.user_store is not None:
             self.user = self.user_store.load()
+            self.user_store.audit.load()
         self.quirks = self._build(self.user)
         implemented, _ = await discover_implemented(
             self._unit, self.device.chain, self._reads, self._read_interval
@@ -216,26 +221,42 @@ class DeviceService:
             preview["test_read"] = json_value(extra[item["id"]].value)
         return user, trial, preview
 
-    async def save_user_item(self, kind: str, item: Any) -> dict[str, Any]:
-        """Check, save and activate a user item (U1–U4); it is used from the next poll."""
+    def _item(self, kind: str, item_id: str) -> dict[str, Any] | None:
+        index = self.user.find(kind, item_id)
+        return None if index is None else self.user.items[KINDS[kind]][index]
+
+    async def save_user_item(self, kind: str, item: Any, who: str) -> dict[str, Any]:
+        """Check, save and activate a user item (U1–U5); it is used from the next poll."""
         async with self._edit_lock:
             user, trial, preview = await self.check_user_item(kind, item)
-            self._activate(user, trial)
-            _LOGGER.info("User %s %s saved: %s", kind, item["id"], item.get("reason"))
-            return preview
+            before = self._item(kind, item["id"])
+            entry = self._activate(user, trial, lambda log: log.add(
+                who, "save", item["id"], kind=kind, before=before, after=item,
+                reason=item.get("reason"),
+            ))  # fmt: skip
+            _LOGGER.info("User %s %s saved as version %s by %s: %s",
+                         kind, item["id"], entry["version"], who, item.get("reason"))  # fmt: skip
+            return {**preview, "version": entry["version"]}
 
-    async def remove_user_item(self, kind: str, item_id: str) -> None:
+    async def remove_user_item(
+        self, kind: str, item_id: str, who: str, reason: str | None = None
+    ) -> None:
         """Remove a user item (U7); its points fall back to the layer below."""
         async with self._edit_lock:
             self._need_store()
             check_kind(kind)
-            if self.user.find(kind, item_id) is None:
+            before = self._item(kind, item_id)
+            if before is None:
                 raise KeyError(item_id)
             user = self.user.without_item(kind, item_id)
-            self._activate(user, self._build(user))
-            _LOGGER.info("User %s %s removed", kind, item_id)
+            self._activate(user, self._build(user), lambda log: log.add(
+                who, "remove", item_id, kind=kind, before=before, reason=reason,
+            ))  # fmt: skip
+            _LOGGER.info("User %s %s removed by %s: %s", kind, item_id, who, reason)
 
-    async def switch_off(self, item_id: str, off: bool) -> None:
+    async def switch_off(
+        self, item_id: str, off: bool, who: str, reason: str | None = None
+    ) -> None:
         """Switch any item, shipped or the user's, off or back on (U6)."""
         async with self._edit_lock:
             self._need_store()
@@ -243,17 +264,46 @@ class DeviceService:
             if not off and item_id in self._quirks_off:
                 raise QuirkError(f"{item_id} is switched off on the command line (--quirk-off)")
             check_off(self.quirks.sets + self.quirks.not_matched, [item_id])
+            before = item_id in self.user.off
             user = self.user.with_off(item_id, off)
-            self._activate(user, self._build(user))
-            _LOGGER.info("User switched %s %s", item_id, "off" if off else "on")
+            action = "off" if off else "on"
+            self._activate(user, self._build(user), lambda log: log.add(
+                who, action, item_id, before=before, after=off, reason=reason,
+            ))  # fmt: skip
+            _LOGGER.info("User switched %s %s by %s: %s", item_id, action, who, reason)
 
-    def _activate(self, user: UserQuirks, quirks: ActiveQuirks) -> None:
-        """Save first, then use: a failed save changes nothing."""
-        self._need_store().save(user)
+    def _activate(
+        self, user: UserQuirks, quirks: ActiveQuirks, record: Callable[[AuditLog], Any]
+    ) -> Any:
+        """Save, log, then use. If either write fails, nothing changes."""
+        store = self._need_store()
+        store.save(user)
+        try:
+            entry = record(store.audit)
+        except OSError as err:
+            store.save(self.user)  # put the old file back
+            message = f"the change was not made: audit log {store.audit.path}: {err}"
+            raise AuditError(message) from err
         self.user = user
         self.quirks = quirks
         assert self.poller is not None
         self.poller.quirks = quirks
+        return entry
+
+    def audit_json(self, item_id: str | None = None) -> dict[str, Any]:
+        """The audit log (U8), oldest first; only ``item_id``'s entries if given."""
+        entries = self._need_store().audit.entries(item_id)
+        return {"device": self.device_id, "entries": entries}
+
+    def versions_json(self, kind: str, item_id: str) -> dict[str, Any]:
+        """Each saved version of one user item (U5), oldest first."""
+        entries = self._need_store().audit.entries(item_id)
+        versions = [
+            {k: e[k] for k in ("version", "time", "who", "reason")} | {"item": e["after"]}
+            for e in entries
+            if e["action"] == "save" and e["kind"] == kind
+        ]
+        return {"device": self.device_id, "kind": kind, "id": item_id, "versions": versions}
 
     def user_json(self) -> dict[str, Any]:
         return {

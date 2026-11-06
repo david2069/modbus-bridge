@@ -1,7 +1,8 @@
 """The REST API (design D7, D9, D12): versioned paths, API tokens, snapshot and events.
 
 There are no writes to devices here (D10). The user's own quirks (design 2b) are
-created, checked, previewed, removed and switched off here.
+created, checked, previewed, removed and switched off here. Each change is added
+to the device's audit log with the token that made it (U5, U8).
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .quirks import QuirkError
-from .service import DeviceService, UserQuirksOff, point_json
+from .service import AuditError, DeviceService, UserQuirksOff, point_json
+from .user_quirks import check_kind
 
 PREFIX = "/api/v1"
 #: Seconds between keep-alive comments on an idle event stream.
@@ -58,6 +60,25 @@ async def event_stream(service: DeviceService, keepalive: float = KEEPALIVE) -> 
         service.unsubscribe(queue)
 
 
+def require_token(request: Request) -> str:
+    """Who is calling: ``token N``, N being the token's place in the list from 1."""
+    tokens: Sequence[str] = request.app.state.tokens
+    header = request.headers.get("authorization", "")
+    scheme, _, given = header.partition(" ")
+    matches = [hmac.compare_digest(given.encode(), token.encode()) for token in tokens]
+    if scheme.lower() != "bearer" or not any(matches):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid API token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return f"token {matches.index(True) + 1}"
+
+
+#: The caller of an endpoint, as logged in the audit log.
+Who = Annotated[str, Depends(require_token)]
+
+
 def create_app(
     services: Mapping[str, DeviceService],
     tokens: Sequence[str],
@@ -67,18 +88,6 @@ def create_app(
     if not tokens or any(not token for token in tokens):
         raise ValueError("at least one non-empty API token is required")
 
-    def require_token(request: Request) -> None:
-        header = request.headers.get("authorization", "")
-        scheme, _, given = header.partition(" ")
-        if scheme.lower() != "bearer" or not any(
-            hmac.compare_digest(given.encode(), token.encode()) for token in tokens
-        ):
-            raise HTTPException(
-                status_code=401,
-                detail="A valid API token is required",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-
     def get_service(device_id: str) -> DeviceService:
         service = services.get(device_id)
         if service is None:
@@ -86,6 +95,7 @@ def create_app(
         return service
 
     app = FastAPI(title="modbus-bridge", version="1", lifespan=lifespan)
+    app.state.tokens = list(tokens)
     auth = [Depends(require_token)]
 
     @app.get(f"{PREFIX}/health")
@@ -134,6 +144,8 @@ def create_app(
             return await call
         except UserQuirksOff as err:
             raise HTTPException(status_code=409, detail=str(err)) from err
+        except AuditError as err:
+            raise HTTPException(status_code=500, detail=str(err)) from err
         except QuirkError as err:
             raise HTTPException(status_code=422, detail=str(err)) from err
 
@@ -151,30 +163,59 @@ def create_app(
         _, _, preview = await edit(service.check_user_item(body["kind"], body["item"]))
         return preview
 
-    @app.put(f"{user_path}/{{kind}}/{{item_id}}", dependencies=auth)
+    def read(call: Any) -> Any:
+        """Read the user quirks' log, turning its errors into HTTP answers."""
+        try:
+            return call()
+        except UserQuirksOff as err:
+            raise HTTPException(status_code=409, detail=str(err)) from err
+        except QuirkError as err:
+            raise HTTPException(status_code=500, detail=str(err)) from err
+
+    @app.get(f"{user_path}/audit", dependencies=auth)
+    async def audit(device_id: str, id: str | None = None) -> dict[str, Any]:
+        service = ready(device_id)
+        return read(lambda: service.audit_json(id))
+
+    @app.get(f"{user_path}/{{kind}}/{{item_id}}/versions", dependencies=auth)
+    async def versions(device_id: str, kind: str, item_id: str) -> dict[str, Any]:
+        service = ready(device_id)
+        try:
+            check_kind(kind)
+        except QuirkError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+        return read(lambda: service.versions_json(kind, item_id))
+
+    @app.put(f"{user_path}/{{kind}}/{{item_id}}")
     async def save_user_quirk(
-        device_id: str, kind: str, item_id: str, item: Annotated[Any, Body()]
+        device_id: str, kind: str, item_id: str, item: Annotated[Any, Body()], who: Who
     ) -> dict[str, Any]:
         if not isinstance(item, dict) or item.get("id") != item_id:
             raise HTTPException(status_code=422, detail="the item's id must match the path")
-        return await edit(ready(device_id).save_user_item(kind, item))
+        return await edit(ready(device_id).save_user_item(kind, item, who))
 
-    @app.delete(f"{user_path}/{{kind}}/{{item_id}}", dependencies=auth)
-    async def remove_user_quirk(device_id: str, kind: str, item_id: str) -> dict[str, str]:
+    @app.delete(f"{user_path}/{{kind}}/{{item_id}}")
+    async def remove_user_quirk(
+        device_id: str, kind: str, item_id: str, who: Who, reason: str | None = None
+    ) -> dict[str, str]:
         try:
-            await edit(ready(device_id).remove_user_item(kind, item_id))
+            await edit(ready(device_id).remove_user_item(kind, item_id, who, reason))
         except KeyError as err:
             raise HTTPException(status_code=404, detail=f"No user {kind} {item_id!r}") from err
         return {"removed": item_id}
 
-    @app.put(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off", dependencies=auth)
-    async def switch_off(device_id: str, item_id: str) -> dict[str, Any]:
-        await edit(ready(device_id).switch_off(item_id, True))
+    @app.put(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off")
+    async def switch_off(
+        device_id: str, item_id: str, who: Who, reason: str | None = None
+    ) -> dict[str, Any]:
+        await edit(ready(device_id).switch_off(item_id, True, who, reason))
         return {"id": item_id, "off": True}
 
-    @app.delete(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off", dependencies=auth)
-    async def switch_on(device_id: str, item_id: str) -> dict[str, Any]:
-        await edit(ready(device_id).switch_off(item_id, False))
+    @app.delete(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off")
+    async def switch_on(
+        device_id: str, item_id: str, who: Who, reason: str | None = None
+    ) -> dict[str, Any]:
+        await edit(ready(device_id).switch_off(item_id, False, who, reason))
         return {"id": item_id, "off": False}
 
     @app.get(f"{PREFIX}/devices/{{device_id}}/events", dependencies=auth)

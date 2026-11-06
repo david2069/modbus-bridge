@@ -4,6 +4,9 @@ The file holds the user's items in the quirk-set format (point quirks, readings,
 constants and rules) and the ids the user has switched off, shipped or their own.
 It is written whole to a new file that then replaces the old one, so a crash
 never leaves half a file.
+
+Every change is also added to an audit log next to it (U5, U8), one JSON object
+per line. A save keeps the item before and after, so each version stays in the log.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +27,10 @@ VERSION = 1
 #: API kind name to the quirk-set field that holds that kind.
 KINDS = {"quirk": "quirks", "reading": "readings", "constant": "constants", "rule": "rules"}
 SOURCE = "user quirk"
+#: What an audit entry records: a user item saved or removed, any item off or on.
+ACTIONS = ("save", "remove", "off", "on")
+_ENTRY_FIELDS = {"time", "who", "device", "action", "kind", "id", "version", "before",
+                 "after", "reason"}  # fmt: skip
 
 
 @dataclass
@@ -97,6 +105,7 @@ class UserQuirkStore:
     def __init__(self, directory: Path, device_id: str) -> None:
         self.path = Path(directory) / f"{device_id}.json"
         self.device_id = device_id
+        self.audit = AuditLog(Path(directory) / f"{device_id}.audit.jsonl", device_id)
 
     def load(self) -> UserQuirks:
         """The saved user quirks; none if the file does not exist yet."""
@@ -131,3 +140,85 @@ class UserQuirkStore:
             file.flush()
             os.fsync(file.fileno())
         new.replace(self.path)
+
+
+class AuditLog:
+    """Every change to one device's user quirks, oldest first (design U5, U8).
+
+    Entries are only ever added. Each save of an item is a new version of it:
+    1, 2, 3 and so on, carrying on after a remove and a later save.
+    """
+
+    def __init__(self, path: Path, device_id: str) -> None:
+        self.path = path
+        self.device_id = device_id
+        self._versions: dict[tuple[str, str], int] = {}
+
+    def load(self) -> None:
+        """Read the log to learn each item's last version; a broken line is an error."""
+        self._versions = {}
+        for entry in self.entries():
+            if entry["action"] == "save":
+                self._versions[entry["kind"], entry["id"]] = entry["version"]
+
+    def entries(self, item_id: str | None = None) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        try:
+            lines = self.path.read_text().splitlines()
+        except OSError as err:
+            raise QuirkError(f"{self.path}: {err}") from err
+        entries = []
+        for number, line in enumerate(lines, 1):
+            try:
+                entry = json.loads(line)
+            except ValueError as err:
+                raise QuirkError(f"{self.path}: line {number}: {err}") from err
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != _ENTRY_FIELDS
+                or entry["action"] not in ACTIONS
+                or not isinstance(entry["id"], str)
+                or (entry["action"] == "save" and not isinstance(entry["version"], int))
+            ):
+                raise QuirkError(f"{self.path}: line {number}: not an audit entry")
+            if item_id is None or entry["id"] == item_id:
+                entries.append(entry)
+        return entries
+
+    def next_version(self, kind: str, item_id: str) -> int:
+        return self._versions.get((kind, item_id), 0) + 1
+
+    def add(
+        self,
+        who: str,
+        action: str,
+        item_id: str,
+        *,
+        kind: str | None = None,
+        before: Any = None,
+        after: Any = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Add one entry and wait until it is on disk."""
+        version = self.next_version(kind, item_id) if action == "save" and kind else None
+        entry = {
+            "time": datetime.now(UTC).isoformat(timespec="seconds"),
+            "who": who,
+            "device": self.device_id,
+            "action": action,
+            "kind": kind,
+            "id": item_id,
+            "version": version,
+            "before": before,
+            "after": after,
+            "reason": reason,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as file:
+            file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        if version is not None and kind is not None:
+            self._versions[kind, item_id] = version
+        return entry

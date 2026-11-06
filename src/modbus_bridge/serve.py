@@ -45,6 +45,7 @@ def build(args: argparse.Namespace) -> FastAPI:
         # Check the saved user quirks now, so a bad file stops start-up with a clear error.
         user_store = UserQuirkStore(args.user_quirks, device_id)
         user_set = user_store.load().quirk_set(device_id, "any")
+        user_store.audit.load()
         check_unique([*quirk_sets, *([user_set] if user_set else [])])
     service = DeviceService(
         device_id,

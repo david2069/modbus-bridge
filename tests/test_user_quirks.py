@@ -27,7 +27,9 @@ def reading(rid: str, address: int, name: str | None = None) -> dict:
             "type": "uint16", "reason": "test"}  # fmt: skip
 
 
-def make(unit: MockModbusUnit, directory: Path | None, off=()) -> tuple[DeviceService, TestClient]:
+def make(
+    unit: MockModbusUnit, directory: Path | None, off=(), tokens=(TOKEN,)
+) -> tuple[DeviceService, TestClient]:
     load_device(unit)
     unit.holding[1000] = [42, 7]
     unit.fail_read(2000, IllegalDataAddressError(2))
@@ -37,7 +39,7 @@ def make(unit: MockModbusUnit, directory: Path | None, off=()) -> tuple[DeviceSe
         user_store=None if directory is None else UserQuirkStore(directory, "unit1"),
     )  # fmt: skip
     asyncio.run(service.setup())
-    return service, TestClient(create_app({"unit1": service}, [TOKEN]))
+    return service, TestClient(create_app({"unit1": service}, list(tokens)))
 
 
 def points(client: TestClient) -> dict:
