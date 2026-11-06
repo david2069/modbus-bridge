@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from enum import Enum, Flag
 from typing import Any
 
@@ -18,10 +19,12 @@ from modbus_connection import ModbusUnit
 from .implemented import ImplementedPoints, discover_implemented
 from .pics import PicsProfile, apply_pics
 from .poller import PointState, Poller
+from .quirks import FORMAT as SET_FORMAT
+from .quirks import VERSION as SET_VERSION
 from .quirks import ActiveQuirks, QuirkError, QuirkSet, check_off, check_unique
 from .raw import read_raw
 from .sunspec import SunSpecDevice, discover
-from .user_quirks import KINDS, AuditLog, UserQuirks, UserQuirkStore, check_kind
+from .user_quirks import KINDS, SOURCE, AuditLog, UserQuirks, UserQuirkStore, check_kind
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +33,10 @@ Update = tuple[int, list[PointState], list[str]]
 #: Changes a slow subscriber may fall behind by before it is dropped. A dropped
 #: subscriber reconnects and starts again from a snapshot.
 QUEUE_SIZE = 2000
+PROPOSAL_FORMAT = "modbus-bridge/quirk-proposal"
+PROPOSAL_VERSION = 1
+#: The audit fields a proposal keeps; who made a change and the device id stay out.
+_HISTORY_FIELDS = ("time", "action", "version", "before", "after", "reason")
 
 
 def json_value(value: Any) -> Any:
@@ -355,6 +362,62 @@ class DeviceService:
             if e["action"] == "save" and e["kind"] == kind
         ]
         return {"device": self.device_id, "kind": kind, "id": item_id, "versions": versions}
+
+    def export_json(self, kind: str, item_id: str) -> dict[str, Any]:
+        """One user item as a proposal for a shipped quirk (U11), to be shared.
+
+        It holds no serial, device id, host or token. Nothing is saved or logged.
+        """
+        self._need_store()
+        check_kind(kind)
+        item = self._item(kind, item_id)
+        if item is None:
+            raise KeyError(item_id)
+        assert self.device is not None and self.poller is not None and self.quirks is not None
+        identity = self.device.identity
+        if not identity.manufacturer or not identity.model:
+            raise QuirkError("the device has no Model 1 manufacturer and model to propose for")
+        without = self._build(self.user.without_item(kind, item_id))
+        effect = _diff(self.poller.preview(without), self.poller.preview(self.quirks))
+        firmware = identity.version or "unknown"
+        source = item.get("source") or (
+            f"{SOURCE}: own measurement on {identity.manufacturer} {identity.model}, "
+            f"firmware {firmware}"
+        )
+        quirk_set = {
+            "format": SET_FORMAT,
+            "version": SET_VERSION,
+            "id": f"proposal-{item_id}",
+            "layer": "model",
+            "match": {"manufacturer": identity.manufacturer, "model": [identity.model]},
+            "source": source,
+            KINDS[kind]: [item],
+        }
+        QuirkSet.from_json(quirk_set, path=f"proposal for {kind} {item_id}")
+        try:
+            entries = self._need_store().audit.entries(item_id)
+        except QuirkError as err:
+            raise AuditError(f"the history cannot be read: {err}") from err
+        history = [{k: e[k] for k in _HISTORY_FIELDS} for e in entries if e["kind"] in (kind, None)]
+        return {
+            "format": PROPOSAL_FORMAT,
+            "version": PROPOSAL_VERSION,
+            "exported": datetime.now(UTC).isoformat(timespec="seconds"),
+            "kind": kind,
+            "id": item_id,
+            "reason": item.get("reason"),
+            "source": item.get("source"),
+            "device": {
+                "manufacturer": identity.manufacturer,
+                "model": identity.model,
+                "options": identity.options,
+                "firmware": identity.version,
+            },
+            "switched_off": item_id in self.user.off,
+            "effect": effect,
+            "history": history,
+            "quirk_set": quirk_set,
+        }
 
     def user_json(self) -> dict[str, Any]:
         return {

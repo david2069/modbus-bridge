@@ -189,6 +189,20 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(err)) from err
         return read(lambda: service.versions_json(kind, item_id))
 
+    @app.get(f"{user_path}/{{kind}}/{{item_id}}/export", dependencies=auth)
+    async def export(device_id: str, kind: str, item_id: str) -> dict[str, Any]:
+        service = ready(device_id)
+        try:
+            return service.export_json(kind, item_id)
+        except UserQuirksOff as err:
+            raise HTTPException(status_code=409, detail=str(err)) from err
+        except AuditError as err:
+            raise HTTPException(status_code=500, detail=str(err)) from err
+        except KeyError as err:
+            raise HTTPException(status_code=404, detail=f"No user {kind} {item_id!r}") from err
+        except QuirkError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+
     @app.put(f"{user_path}/{{kind}}/{{item_id}}")
     async def save_user_quirk(
         device_id: str, kind: str, item_id: str, item: Annotated[Any, Body()], who: Who
