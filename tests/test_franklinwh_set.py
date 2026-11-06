@@ -154,3 +154,58 @@ def test_point_json_carries_options_and_total() -> None:
     energy = point_json(outs["solar_energy_total"])
     assert energy["total"] is True
     assert "options" not in energy
+
+
+NO_VALUE_READINGS = {"fwh-r-load-coarse", "fwh-r-load-fine", "fwh-r-reserve-self",
+                     "fwh-r-reserve-tou", "fwh-r-reserve-active"}  # fmt: skip
+PV_INT16 = {"fwh-r-pv-total", "fwh-r-pv-local", "fwh-r-pv-remote-1", "fwh-r-pv-remote-2"}
+
+
+def readings() -> dict:
+    return {r.id: r for r in QuirkSet.load(FILE).readings}
+
+
+def test_0xffff_gives_no_value_on_load_and_reserves() -> None:
+    by_id = readings()
+    for rid in NO_VALUE_READINGS:
+        reading = by_id[rid]
+        assert reading.decode([0xFFFF]) is None, rid
+        assert (reading.decode([0]), reading.decode([42])) == (0, 42), rid
+        assert "poller.py" in reading.source
+
+
+def test_int16_pv_readings_unchanged() -> None:
+    by_id = readings()
+    for rid in PV_INT16:
+        assert by_id[rid].decode([0xFFFF]) == -1, rid
+
+
+def test_no_value_on_16000_does_not_latch_n1() -> None:
+    quirks = found()
+    out = run(quirks, raw__home_load_fine=None, raw__home_load_coarse=300)["home_load_power"]
+    assert out.value == 300
+    assert out.trace["latched"] is False
+    later = run(quirks, raw__home_load_fine=400, raw__home_load_coarse=500)["home_load_power"]
+    assert later.value == 500
+
+
+@pytest.mark.parametrize(
+    ("key", "hidden"),
+    [
+        ("714.DCA", True), ("714.Prt[1].DCA", True), ("714.Prt[2].DCA", True),
+        ("701.DERMode", True), ("714.DCW", False), ("714.Prt[1].DCAlrm", False),
+        ("714.Prt[1].DCV", False), ("701.Alrm", False), ("701.DERModeX", False),
+    ],
+)  # fmt: skip
+def test_hide_quirks_match_only_their_points(key: str, hidden: bool) -> None:
+    assert (found().apply(state(key, 0)) is None) is hidden
+
+
+def test_hide_quirks_have_sources_and_switch_off() -> None:
+    [qs] = load_sets([FILE])
+    ids = {"fwh-q-dca", "fwh-q-dca-port", "fwh-q-dermode"}
+    assert {q.id for q in qs.quirks} == ids
+    assert all("vendor-issues.md" in q.source for q in qs.quirks)
+    quirks = found(off=sorted(ids))
+    for key in ("714.DCA", "714.Prt[1].DCA", "701.DERMode"):
+        assert quirks.apply(state(key, 0)) is not None
