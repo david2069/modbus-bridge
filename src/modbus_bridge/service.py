@@ -25,6 +25,8 @@ from .user_quirks import KINDS, AuditLog, UserQuirks, UserQuirkStore, check_kind
 
 _LOGGER = logging.getLogger(__name__)
 
+#: What a subscriber receives per poll: sequence, changed points, removed keys.
+Update = tuple[int, list[PointState], list[str]]
 #: Changes a slow subscriber may fall behind by before it is dropped. A dropped
 #: subscriber reconnects and starts again from a snapshot.
 QUEUE_SIZE = 2000
@@ -92,6 +94,34 @@ def _diff(
     return changes
 
 
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _warnings(changes: Sequence[Mapping[str, Any]]) -> list[str]:
+    """What HA users should know first: a point that stays but changes unit or scale (Q4).
+
+    The before and after states come from the same poll's data, so a number that
+    differs under the same unit was rescaled or recalculated by the change.
+    """
+    warnings = []
+    for change in changes:
+        old, new = change["before"], change["after"]
+        if old is None or new is None:
+            continue
+        if old["units"] != new["units"]:
+            what = f"unit {old['units']} → {new['units']}"
+        elif _number(old["value"]) and _number(new["value"]) and old["value"] != new["value"]:
+            what = f"value {old['value']} → {new['value']} with the same unit {old['units']}"
+        else:
+            continue
+        warnings.append(
+            f"{change['key']}: {what}. Home Assistant's history and long-term statistics "
+            "for this entity will mix old and new values; HA may raise a repair notice."
+        )
+    return warnings
+
+
 class DeviceService:
     """Discover one unit, then poll it on a timer and tell subscribers what changed."""
 
@@ -125,7 +155,7 @@ class DeviceService:
         self.device: SunSpecDevice | None = None
         self.poller: Poller | None = None
         self.sequence = 0
-        self._subscribers: set[asyncio.Queue[tuple[int, list[PointState]] | None]] = set()
+        self._subscribers: set[asyncio.Queue[Update | None]] = set()
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -155,9 +185,10 @@ class DeviceService:
             raise RuntimeError("service not started")
         async with self._poll_lock:
             changes = await self.poller.poll()
-        if changes:
+            removed = list(self.poller.removed)
+        if changes or removed:
             self.sequence += 1
-            self._publish(self.sequence, changes)
+            self._publish(self.sequence, changes, removed)
         return changes
 
     def _build(self, user: UserQuirks) -> ActiveQuirks:
@@ -212,10 +243,14 @@ class DeviceService:
         after = self.poller.preview(trial, extra)
         if item["id"] in trial.failing:
             raise QuirkError(f"{kind} {item['id']}: {trial.failing[item['id']]}")
+        # Both sides from the same poll's data: the snapshot may predate the last edit.
+        assert self.quirks is not None
+        changes = _diff(self.poller.preview(self.quirks, extra), after)
         preview = {
             "kind": kind,
             "id": item["id"],
-            "changes": _diff(self.poller.snapshot, after),
+            "changes": changes,
+            "warnings": _warnings(changes),
         }
         if kind == "reading":
             preview["test_read"] = json_value(extra[item["id"]].value)
@@ -240,8 +275,10 @@ class DeviceService:
 
     async def remove_user_item(
         self, kind: str, item_id: str, who: str, reason: str | None = None
-    ) -> None:
-        """Remove a user item (U7); its points fall back to the layer below."""
+    ) -> list[str]:
+        """Remove a user item (U7); its points fall back to the layer below.
+
+        Returns the warnings for points that change unit or scale (Q4)."""
         async with self._edit_lock:
             self._need_store()
             check_kind(kind)
@@ -249,15 +286,20 @@ class DeviceService:
             if before is None:
                 raise KeyError(item_id)
             user = self.user.without_item(kind, item_id)
-            self._activate(user, self._build(user), lambda log: log.add(
+            quirks = self._build(user)
+            warnings = self._warnings_for(quirks)
+            self._activate(user, quirks, lambda log: log.add(
                 who, "remove", item_id, kind=kind, before=before, reason=reason,
             ))  # fmt: skip
             _LOGGER.info("User %s %s removed by %s: %s", kind, item_id, who, reason)
+            return warnings
 
     async def switch_off(
         self, item_id: str, off: bool, who: str, reason: str | None = None
-    ) -> None:
-        """Switch any item, shipped or the user's, off or back on (U6)."""
+    ) -> list[str]:
+        """Switch any item, shipped or the user's, off or back on (U6).
+
+        Returns the warnings for points that change unit or scale (Q4)."""
         async with self._edit_lock:
             self._need_store()
             assert self.quirks is not None
@@ -267,10 +309,19 @@ class DeviceService:
             before = item_id in self.user.off
             user = self.user.with_off(item_id, off)
             action = "off" if off else "on"
-            self._activate(user, self._build(user), lambda log: log.add(
+            quirks = self._build(user)
+            warnings = self._warnings_for(quirks)
+            self._activate(user, quirks, lambda log: log.add(
                 who, action, item_id, before=before, after=off, reason=reason,
             ))  # fmt: skip
             _LOGGER.info("User switched %s %s by %s: %s", item_id, action, who, reason)
+            return warnings
+
+    def _warnings_for(self, quirks: ActiveQuirks) -> list[str]:
+        assert self.poller is not None
+        assert self.quirks is not None
+        before = self.poller.preview(self.quirks)
+        return _warnings(_diff(before, self.poller.preview(quirks)))
 
     def _activate(
         self, user: UserQuirks, quirks: ActiveQuirks, record: Callable[[AuditLog], Any]
@@ -334,18 +385,20 @@ class DeviceService:
             except Exception:
                 _LOGGER.exception("Poll of %s failed unexpectedly", self.device_id)
 
-    def subscribe(self) -> asyncio.Queue[tuple[int, list[PointState]] | None]:
-        queue: asyncio.Queue[tuple[int, list[PointState]] | None] = asyncio.Queue(QUEUE_SIZE)
+    def subscribe(self) -> asyncio.Queue[Update | None]:
+        queue: asyncio.Queue[Update | None] = asyncio.Queue(QUEUE_SIZE)
         self._subscribers.add(queue)
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue[Any]) -> None:
         self._subscribers.discard(queue)
 
-    def _publish(self, sequence: int, changes: Sequence[PointState]) -> None:
+    def _publish(
+        self, sequence: int, changes: Sequence[PointState], removed: Sequence[str] = ()
+    ) -> None:
         for queue in list(self._subscribers):
             try:
-                queue.put_nowait((sequence, list(changes)))
+                queue.put_nowait((sequence, list(changes), list(removed)))
             except asyncio.QueueFull:
                 _LOGGER.warning("Dropping a slow subscriber of %s", self.device_id)
                 self._close(queue)

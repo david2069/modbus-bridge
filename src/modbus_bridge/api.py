@@ -41,7 +41,8 @@ def snapshot_json(service: DeviceService) -> dict[str, Any]:
 
 
 async def event_stream(service: DeviceService, keepalive: float = KEEPALIVE) -> AsyncIterator[str]:
-    """A snapshot first, then one ``change`` event per changed point (D9)."""
+    """A snapshot first, then a ``change`` event per changed point and a ``removed``
+    event per point a quirk took away (D9)."""
     queue = service.subscribe()
     try:
         yield sse("snapshot", service.sequence, snapshot_json(service))
@@ -53,9 +54,11 @@ async def event_stream(service: DeviceService, keepalive: float = KEEPALIVE) -> 
                 continue
             if item is None:
                 return
-            sequence, changes = item
+            sequence, changes, removed = item
             for state in changes:
                 yield sse("change", sequence, point_json(state))
+            for key in removed:
+                yield sse("removed", sequence, {"key": key})
     finally:
         service.unsubscribe(queue)
 
@@ -197,26 +200,26 @@ def create_app(
     @app.delete(f"{user_path}/{{kind}}/{{item_id}}")
     async def remove_user_quirk(
         device_id: str, kind: str, item_id: str, who: Who, reason: str | None = None
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         try:
-            await edit(ready(device_id).remove_user_item(kind, item_id, who, reason))
+            warnings = await edit(ready(device_id).remove_user_item(kind, item_id, who, reason))
         except KeyError as err:
             raise HTTPException(status_code=404, detail=f"No user {kind} {item_id!r}") from err
-        return {"removed": item_id}
+        return {"removed": item_id, "warnings": warnings}
 
     @app.put(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off")
     async def switch_off(
         device_id: str, item_id: str, who: Who, reason: str | None = None
     ) -> dict[str, Any]:
-        await edit(ready(device_id).switch_off(item_id, True, who, reason))
-        return {"id": item_id, "off": True}
+        warnings = await edit(ready(device_id).switch_off(item_id, True, who, reason))
+        return {"id": item_id, "off": True, "warnings": warnings}
 
     @app.delete(f"{PREFIX}/devices/{{device_id}}/quirks/{{item_id}}/off")
     async def switch_on(
         device_id: str, item_id: str, who: Who, reason: str | None = None
     ) -> dict[str, Any]:
-        await edit(ready(device_id).switch_off(item_id, False, who, reason))
-        return {"id": item_id, "off": False}
+        warnings = await edit(ready(device_id).switch_off(item_id, False, who, reason))
+        return {"id": item_id, "off": False, "warnings": warnings}
 
     @app.get(f"{PREFIX}/devices/{{device_id}}/events", dependencies=auth)
     async def events(device_id: str) -> StreamingResponse:

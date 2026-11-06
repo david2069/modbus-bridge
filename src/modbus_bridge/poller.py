@@ -70,6 +70,8 @@ class Poller:
         self.last_error: str | None = None
         self._last_readings: list[ModelReading] = []
         self._last_raw: dict[str, RawResult] = {}
+        self.removed: list[str] = []
+        """Keys the last poll took out of the snapshot (a quirk no longer gives them)."""
 
     @property
     def implemented(self) -> ImplementedPoints:
@@ -161,10 +163,16 @@ class Poller:
                 continue
             if failed_models is None or _model_prefix(key) in failed_models:
                 new[key] = replace(old, value=None)  # not read this time: unavailable
+        # Anything a consumer shows counts (value, label, units, options, quirks);
+        # only the trace is left out of the comparison.
         changed = [
             state
             for key, state in sorted(new.items())
-            if key not in self._snapshot or self._snapshot[key].value != state.value
+            if key not in self._snapshot or self._snapshot[key] != state
         ]
+        # A point that failed to read was kept above, so only points no longer built go.
+        self.removed = sorted(self._snapshot.keys() - new.keys())
+        for key in self.removed:
+            _LOGGER.info("Point %s removed: the active quirks no longer give it", key)
         self._snapshot = new
         return changed

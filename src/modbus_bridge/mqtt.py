@@ -5,9 +5,10 @@ Usage:
         --device-id unit1 --mqtt-host 192.0.2.20 [--mqtt-port 1883] [--prefix modbus_bridge]
 
 It reads the device from the API, then follows the API's event stream: a
-snapshot publishes every entity and state, and each change publishes that
-point's state. If the stream is lost, the device is marked offline in Home
-Assistant and the publisher reconnects.
+snapshot publishes every entity and state, each change publishes that
+point's state, and each removal deletes that point's entity. If the stream
+is lost, the device is marked offline in Home Assistant and the publisher
+reconnects.
 """
 
 from __future__ import annotations
@@ -60,7 +61,8 @@ async def follow(
     device_id: str,
 ) -> None:
     """Publish from the event stream until it ends or fails."""
-    known: set[str] = set()
+    sent: dict[str, str] = {}
+    """The discovery config last sent for each point, to send it again when it changes."""
     parser = SseParser()
     url = f"{base}/api/v1/devices/{device_id}/events"
     async with http.stream("GET", url) as response:
@@ -72,13 +74,23 @@ async def follow(
             data = json.loads(event.data)
             if event.event == "snapshot":
                 points = data["points"]
-                known = set(points)
+                sent = {key: publisher.discovery(p).payload for key, p in points.items()}
                 count = await _publish(client, publisher.snapshot(points))
                 _LOGGER.info("Snapshot: %d points, %d messages", len(points), count)
             elif event.event == "change":
-                messages = [] if data["key"] in known else [publisher.discovery(data)]
-                known.add(data["key"])
+                messages = []
+                # Without a value an enum point cannot be told from a number, so the
+                # config of an unavailable point that is already known is left as it is.
+                if data["key"] not in sent or data.get("value") is not None:
+                    config = publisher.discovery(data)
+                    if sent.get(data["key"]) != config.payload:
+                        messages.append(config)
+                        sent[data["key"]] = config.payload
                 await _publish(client, [*messages, *publisher.state(data)])
+            elif event.event == "removed":
+                sent.pop(data["key"], None)
+                await _publish(client, publisher.remove(data["key"]))
+                _LOGGER.info("Removed %s from Home Assistant", data["key"])
 
 
 async def run(args: argparse.Namespace) -> None:

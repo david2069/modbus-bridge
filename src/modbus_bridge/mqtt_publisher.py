@@ -20,7 +20,9 @@ OFFLINE = "offline"
 #: SunSpec unit spelling to Home Assistant's. Units not listed are passed on as they are.
 HA_UNITS: dict[str, str] = {
     "W": "W",
+    "kW": "kW",
     "Wh": "Wh",
+    "kWh": "kWh",
     "WH": "Wh",
     "VA": "VA",
     "Var": "var",
@@ -39,6 +41,7 @@ HA_UNITS: dict[str, str] = {
 #: Home Assistant device class for each HA unit.
 HA_DEVICE_CLASSES: dict[str, str] = {
     "W": "power",
+    "kW": "power",
     "VA": "apparent_power",
     "var": "reactive_power",
     "V": "voltage",
@@ -117,7 +120,7 @@ def sensor_classes(point: Mapping[str, Any]) -> dict[str, str]:
         fields["unit_of_measurement"] = ha_unit
     name = point.get("name", "")
     sunspec_type = point.get("type") or ""
-    if ha_unit == "Wh":
+    if ha_unit in ("Wh", "kWh"):
         if (
             point.get("total")
             or sunspec_type.startswith("acc")
@@ -215,6 +218,11 @@ class DiscoveryPublisher:
         if text is None:
             return [Message(available_topic, OFFLINE)]
         return [Message(state_topic, text), Message(available_topic, ONLINE)]
+
+    def remove(self, key: str) -> list[Message]:
+        """Delete a point's entity in HA (an empty config) and clear its retained topics."""
+        _, config_topic, state_topic, available_topic = self._topics(key)
+        return [Message(config_topic, ""), Message(state_topic, ""), Message(available_topic, "")]
 
     def snapshot(self, points: Mapping[str, Mapping[str, Any]]) -> Iterator[Message]:
         """Everything for a full snapshot: discovery, states, then device online."""
