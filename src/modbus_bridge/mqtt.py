@@ -8,7 +8,11 @@ It reads the device from the API, then follows the API's event stream: a
 snapshot publishes every entity and state, each change publishes that
 point's state, and each removal deletes that point's entity. After each
 snapshot it also deletes this device's entities that the broker still keeps
-but the snapshot no longer has (from changes made while it was not running). If the stream
+but the snapshot no longer has (from changes made while it was not running).
+
+Every stop marks the device offline in Home Assistant: Ctrl-C and SIGTERM
+publish ``offline`` before disconnecting, and the broker's last will covers
+a crash. A lost broker is retried like a lost API, from a fresh snapshot. If the stream
 is lost, the device is marked offline in Home Assistant and the publisher
 reconnects.
 """
@@ -19,7 +23,9 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -141,11 +147,40 @@ async def follow(
                 _LOGGER.info("Removed %s from Home Assistant", data["key"])
 
 
-async def run(args: argparse.Namespace) -> None:
+async def mark_offline(client: aiomqtt.Client, publisher: DiscoveryPublisher) -> None:
+    """Publish the device offline; if the broker is gone, its last will does it."""
+    try:
+        async with asyncio.timeout(RETRY_SECONDS):
+            await _publish(client, [publisher.offline()])
+        _LOGGER.info("Device marked offline")
+    except (aiomqtt.MqttError, TimeoutError) as err:
+        _LOGGER.warning("Could not mark the device offline (%s); the last will covers it", err)
+
+
+async def _follow_forever(
+    client: aiomqtt.Client, http: httpx.AsyncClient, publisher: DiscoveryPublisher, args: Any
+) -> None:
+    while True:
+        try:
+            await follow(client, http, publisher, args.api_url, args.device_id)
+            _LOGGER.warning("Event stream ended")
+        except httpx.HTTPError as err:
+            _LOGGER.warning("Event stream lost: %s", err)
+        await _publish(client, [publisher.offline()])
+        _LOGGER.info("Device marked offline; reconnecting in %.0f s", RETRY_SECONDS)
+        await asyncio.sleep(RETRY_SECONDS)
+
+
+async def run(
+    args: argparse.Namespace,
+    connect: Callable[..., Any] = aiomqtt.Client,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    """Publish until cancelled. ``connect`` and ``transport`` are for tests."""
     token = args.token_file.read_text().strip()
     headers = {"Authorization": f"Bearer {token}"}
     timeout = httpx.Timeout(10.0, read=READ_TIMEOUT)
-    async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, transport=transport) as http:
         while True:
             try:
                 detail = await fetch_detail(http, args.api_url, args.device_id)
@@ -155,22 +190,39 @@ async def run(args: argparse.Namespace) -> None:
                 await asyncio.sleep(RETRY_SECONDS)
         publisher = DiscoveryPublisher(detail, prefix=args.prefix)
         will = aiomqtt.Will(publisher.availability_topic, OFFLINE, qos=1, retain=True)
-        async with aiomqtt.Client(
-            hostname=args.mqtt_host,
-            port=args.mqtt_port,
-            identifier=f"{args.prefix}_{publisher.device_id}",
-            will=will,
-        ) as client:
-            _LOGGER.info("Publishing %s to MQTT under %s", args.device_id, publisher.base)
-            while True:
-                try:
-                    await follow(client, http, publisher, args.api_url, args.device_id)
-                    _LOGGER.warning("Event stream ended")
-                except httpx.HTTPError as err:
-                    _LOGGER.warning("Event stream lost: %s", err)
-                await _publish(client, [publisher.offline()])
-                _LOGGER.info("Device marked offline; reconnecting in %.0f s", RETRY_SECONDS)
+        while True:
+            try:
+                async with connect(
+                    hostname=args.mqtt_host,
+                    port=args.mqtt_port,
+                    identifier=f"{args.prefix}_{publisher.device_id}",
+                    will=will,
+                ) as client:
+                    _LOGGER.info("Publishing %s to MQTT under %s", args.device_id, publisher.base)
+                    try:
+                        await _follow_forever(client, http, publisher, args)
+                    finally:
+                        # Also on Ctrl-C and SIGTERM: a clean disconnect sends no last will.
+                        await mark_offline(client, publisher)
+            except aiomqtt.MqttError as err:
+                _LOGGER.warning("MQTT broker lost or not reachable (%s); retrying in %.0f s",
+                                err, RETRY_SECONDS)  # fmt: skip
                 await asyncio.sleep(RETRY_SECONDS)
+
+
+async def until_stopped(work: Awaitable[None]) -> None:
+    """Run ``work``; SIGTERM stops it in the same orderly way as Ctrl-C."""
+    task = asyncio.ensure_future(work)
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        await task
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise
+        _LOGGER.info("Stopped")
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -184,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
-        asyncio.run(run(args))
+        asyncio.run(until_stopped(run(args)))
     except IdentityError as err:
         print(f"Error: {err}", file=sys.stderr)
         return 1
