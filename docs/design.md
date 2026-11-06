@@ -84,6 +84,7 @@ The device catalogue is data, with one entry for each maker and model:
 
 - The user always sees what was found and confirms it.
 - An unknown device still works in SunSpec mode, as a generic battery, solar inverter or hybrid.
+- **Raw probe identity (P2).** For a device without SunSpec, the C4 probe fills the same identity fields that Model 1 gives: manufacturer, model, options, firmware and serial. A field the maker's registers do not give stays empty, never guessed (rule 8). Each field records where it came from: Model 1, a probed register, or the user. The vendor, model and firmware quirk layers (L2–L4) then match a raw device exactly as they match a SunSpec one.
 - Each unit id on the same address is its own device, and all share one connection that takes turns (D5).
 
 ## 2b. Quirks: when they take effect, and the user's own quirks
@@ -273,7 +274,7 @@ hilman2 lists no EVSE (car charger).
 |---|---|---|
 | P0 | Baseline design | Agreed 2026-11-03 |
 | P1 | Read and publish baseline SunSpec: connect, Model 1, every model, standard names | An emulated aGate and one other SunSpec device publish correctly |
-| P2 | Quirk layers L2–L5, neutral labels, the evaluator (3a) and user quirks (2b), with FranklinWH first | FranklinWH extensions show under N1–N11, with every quirk visible |
+| P2 | Quirk layers L2–L5, neutral labels, the evaluator (3a), user quirks (2b) and raw probe identity (C4), with FranklinWH first | FranklinWH extensions show under N1–N11, with every quirk visible; a raw-only emulated device is identified by probe and matched to its quirk layers |
 | P2W | Writes from modules through the REST API, limited by the quirk layers (D10) | Each write passes its own test plan against the emulator |
 | P3 | Import hilman2's quirk set for a maker, only when users need it, with credit | Each imported set loads and is credited |
 | P4 | Takeover of existing integrations | The cjne takeover test is repeated with modbus-bridge |
