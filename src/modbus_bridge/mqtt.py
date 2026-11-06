@@ -6,7 +6,9 @@ Usage:
 
 It reads the device from the API, then follows the API's event stream: a
 snapshot publishes every entity and state, each change publishes that
-point's state, and each removal deletes that point's entity. If the stream
+point's state, and each removal deletes that point's entity. After each
+snapshot it also deletes this device's entities that the broker still keeps
+but the snapshot no longer has (from changes made while it was not running). If the stream
 is lost, the device is marked offline in Home Assistant and the publisher
 reconnects.
 """
@@ -36,6 +38,10 @@ _LOGGER = logging.getLogger(__name__)
 RETRY_SECONDS = 5.0
 #: The API sends a keep-alive every 15 s, so a silent stream for this long is dead.
 READ_TIMEOUT = 45.0
+#: Reading back retained configs ends after this long without a message...
+RETAINED_QUIET = 1.0
+#: ...or after this long in all.
+RETAINED_LIMIT = 10.0
 
 
 async def _publish(client: aiomqtt.Client, messages: Any) -> int:
@@ -45,6 +51,47 @@ async def _publish(client: aiomqtt.Client, messages: Any) -> int:
         await client.publish(message.topic, message.payload, qos=1, retain=message.retain)
         count += 1
     return count
+
+
+async def read_retained(
+    client: aiomqtt.Client,
+    topic_filter: str,
+    quiet: float | None = None,
+    limit: float | None = None,
+) -> dict[str, str]:
+    """The retained messages under ``topic_filter``, by topic."""
+    quiet = RETAINED_QUIET if quiet is None else quiet
+    limit = RETAINED_LIMIT if limit is None else limit
+    found: dict[str, str] = {}
+    await client.subscribe(topic_filter, qos=1)
+    try:
+        async with asyncio.timeout(limit):
+            messages = aiter(client.messages)
+            while True:
+                try:
+                    message = await asyncio.wait_for(anext(messages), quiet)
+                except TimeoutError:
+                    break
+                payload = message.payload
+                if message.retain and isinstance(payload, (bytes, bytearray)) and payload:
+                    found[str(message.topic)] = payload.decode("utf-8", "replace")
+    except TimeoutError:
+        _LOGGER.warning("Read %d retained configs in %.0f s; there may be more", len(found), limit)
+    finally:
+        await client.unsubscribe(topic_filter)
+    return found
+
+
+async def remove_stale(
+    client: aiomqtt.Client, publisher: DiscoveryPublisher, points: dict[str, Any]
+) -> int:
+    """Delete this device's retained entities that ``points`` no longer has."""
+    retained = await read_retained(client, publisher.config_filter)
+    stale = publisher.stale(retained, points)
+    for unique_id, messages in stale:
+        await _publish(client, messages)
+        _LOGGER.info("Removed stale entity %s from Home Assistant", unique_id)
+    return len(stale)
 
 
 async def fetch_detail(http: httpx.AsyncClient, base: str, device_id: str) -> dict[str, Any]:
@@ -77,6 +124,7 @@ async def follow(
                 sent = {key: publisher.discovery(p).payload for key, p in points.items()}
                 count = await _publish(client, publisher.snapshot(points))
                 _LOGGER.info("Snapshot: %d points, %d messages", len(points), count)
+                await remove_stale(client, publisher, points)
             elif event.event == "change":
                 messages = []
                 # Without a value an enum point cannot be told from a number, so the

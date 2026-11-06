@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -79,12 +81,52 @@ def test_publisher_remove_messages() -> None:
     assert all(m.payload == "" and m.retain for m in removal)
 
 
+@dataclass
+class FakeMessage:
+    topic: str
+    payload: bytes
+    retain: bool = True
+
+
+def matches(topic_filter: str, topic: str) -> bool:
+    parts, levels = topic_filter.split("/"), topic.split("/")
+    return len(parts) == len(levels) and all(
+        p in ("+", t) for p, t in zip(parts, levels, strict=True)
+    )
+
+
 class FakeMqtt:
-    def __init__(self) -> None:
+    """Keeps retained messages like a broker; a subscribe delivers the matching ones."""
+
+    def __init__(self, retained: dict[str, str] | None = None) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.retained: dict[str, str] = dict(retained or {})
+        self.subscribed: list[str] = []
+        self._queue: asyncio.Queue[FakeMessage] = asyncio.Queue()
 
     async def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
         self.sent.append((topic, payload))
+        if retain and payload:
+            self.retained[topic] = payload
+        elif retain:
+            self.retained.pop(topic, None)
+
+    async def subscribe(self, topic_filter: str, qos: int) -> None:
+        self.subscribed.append(topic_filter)
+        for topic, payload in self.retained.items():
+            if matches(topic_filter, topic):
+                self._queue.put_nowait(FakeMessage(topic, payload.encode()))
+
+    async def unsubscribe(self, topic_filter: str) -> None:
+        self.subscribed.remove(topic_filter)
+
+    @property
+    def messages(self) -> AsyncIterator[FakeMessage]:
+        async def gen() -> AsyncIterator[FakeMessage]:
+            while True:
+                yield await self._queue.get()
+
+        return gen()
 
 
 def test_point_back_after_removal_gets_discovery_again() -> None:

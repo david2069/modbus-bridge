@@ -224,6 +224,39 @@ class DiscoveryPublisher:
         _, config_topic, state_topic, available_topic = self._topics(key)
         return [Message(config_topic, ""), Message(state_topic, ""), Message(available_topic, "")]
 
+    @property
+    def config_filter(self) -> str:
+        """The topic filter that matches every sensor config, ours and others'."""
+        return f"{DISCOVERY_PREFIX}/sensor/+/config"
+
+    def stale(
+        self, retained: Mapping[str, str], points: Mapping[str, Mapping[str, Any]]
+    ) -> list[tuple[str, list[Message]]]:
+        """Removals for retained configs of this device that ``points`` no longer has.
+
+        A config is ours only if its device identifiers are ours; a topic that merely
+        starts like ours may belong to another device. Its own state and point
+        availability topics are cleared too; the device-wide one never is.
+        """
+        current = {self._topics(key)[1] for key in points}
+        found = []
+        for topic, payload in sorted(retained.items()):
+            if topic in current:
+                continue
+            try:
+                config = json.loads(payload)
+                if config["device"]["identifiers"] != self.device["identifiers"]:
+                    continue
+            except (ValueError, TypeError, KeyError):
+                continue
+            topics = [topic, config.get("state_topic")]
+            for entry in config.get("availability") or []:
+                if isinstance(entry, dict) and entry.get("topic") != self.availability_topic:
+                    topics.append(entry.get("topic"))
+            messages = [Message(t, "") for t in topics if isinstance(t, str) and t]
+            found.append((str(config.get("unique_id") or topic), messages))
+        return found
+
     def snapshot(self, points: Mapping[str, Mapping[str, Any]]) -> Iterator[Message]:
         """Everything for a full snapshot: discovery, states, then device online."""
         for point in points.values():
