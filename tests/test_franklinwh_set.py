@@ -157,7 +157,8 @@ def test_point_json_carries_options_and_total() -> None:
 
 
 NO_VALUE_READINGS = {"fwh-r-load-coarse", "fwh-r-load-fine", "fwh-r-reserve-self",
-                     "fwh-r-reserve-tou", "fwh-r-reserve-active"}  # fmt: skip
+                     "fwh-r-reserve-tou", "fwh-r-reserve-active", "fwh-r-pv-local-fitted",
+                     "fwh-r-pv-remote-fitted", "fwh-r-mode", "fwh-r-grid-status"}  # fmt: skip
 PV_INT16 = {"fwh-r-pv-total", "fwh-r-pv-local", "fwh-r-pv-remote-1", "fwh-r-pv-remote-2"}
 
 
@@ -172,6 +173,20 @@ def test_0xffff_gives_no_value_on_load_and_reserves() -> None:
         assert reading.decode([0xFFFF]) is None, rid
         assert (reading.decode([0]), reading.decode([42])) == (0, 42), rid
         assert "poller.py" in reading.source
+
+
+@pytest.mark.parametrize(
+    ("reading", "label"),
+    [
+        ("pv_local_installed", "solar_local_installed"),
+        ("pv_remote_installed", "solar_remote_installed"),
+        ("operating_mode", "battery_operating_mode"),
+        ("grid_status", "grid_connection_status"),
+    ],
+)
+def test_no_value_on_flags_mode_and_status_gives_no_label(reading: str, label: str) -> None:
+    out = run(found(), **{f"raw__{reading}": None})[label]
+    assert out.value is None
 
 
 def test_int16_pv_readings_unchanged() -> None:
