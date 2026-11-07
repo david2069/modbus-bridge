@@ -69,7 +69,7 @@ def version_numbers(text: str | None) -> tuple[int, ...] | None:
 class Match:
     """The Model 1 values a quirk set applies to."""
 
-    manufacturer: str
+    manufacturers: tuple[str, ...]
     models: tuple[str, ...] | None = None
     options: tuple[str, ...] | None = None
     firmware_min: tuple[int, ...] | None = None
@@ -77,7 +77,8 @@ class Match:
     text: Mapping[str, Any] = field(default_factory=dict)
 
     def accepts(self, identity: DeviceIdentity) -> bool:
-        if identity.manufacturer != self.manufacturer:
+        # Exact names only: a guessed match would apply another maker's quirks.
+        if identity.manufacturer not in self.manufacturers:
             return False
         if self.models is not None and identity.model not in self.models:
             return False
@@ -232,7 +233,11 @@ def _match(layer: str, data: Any) -> Match:
         ):
             raise QuirkError("firmware min and max must contain numbers")
     return Match(
-        manufacturer=_text(data["manufacturer"], "manufacturer"),
+        manufacturers=(
+            (_text(data["manufacturer"], "manufacturer"),)
+            if isinstance(data["manufacturer"], str)
+            else _texts(data["manufacturer"], "manufacturer")
+        ),
         models=_texts(data["model"], "model") if "model" in data else None,
         options=_texts(data["options"], "options") if "options" in data else None,
         firmware_min=firmware_min,

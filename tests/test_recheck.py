@@ -22,10 +22,13 @@ FIRMWARE_2 = quirk_set(
 )  # fmt: skip
 
 
-def load(unit: MockModbusUnit, version="1.0.0", serial="SN-PLACEHOLDER", battery=True) -> None:
+def load(
+    unit: MockModbusUnit, version="1.0.0", serial="SN-PLACEHOLDER", battery=True,
+    maker="ExampleMaker",
+) -> None:  # fmt: skip
     common = [
         1, 66,
-        *encode_string("ExampleMaker", length=16),
+        *encode_string(maker, length=16),
         *encode_string("ExampleModel", length=16),
         *encode_string("", length=8),
         *encode_string(version, length=8),

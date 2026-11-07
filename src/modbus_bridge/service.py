@@ -153,13 +153,18 @@ def _warnings(changes: Sequence[Mapping[str, Any]]) -> list[str]:
     return warnings
 
 
-def _who(identity: DeviceIdentity) -> tuple[str | None, str | None, str | None]:
-    """What makes a device the same device: maker, model and serial."""
+def _who(identity: DeviceIdentity) -> tuple[str | None, ...]:
+    """What makes a device the same device: model and serial, or with no serial also
+    the maker. The aGate's maker name differs by firmware, so it is not compared when
+    there is a serial to go by."""
+    if identity.serial:
+        return identity.model, identity.serial
     return identity.manufacturer, identity.model, identity.serial
 
 
 def _describe(identity: DeviceIdentity) -> str:
-    return " ".join(str(x) for x in _who(identity) if x) or "no Model 1 identity"
+    who = (identity.manufacturer, identity.model, identity.serial)
+    return " ".join(str(x) for x in who if x) or "no Model 1 identity"
 
 
 def _layout(device: SunSpecDevice) -> tuple[Any, ...]:
@@ -302,10 +307,15 @@ class DeviceService:
         if old == new and not chain_changed:
             _LOGGER.info("Device %s checked after a reconnect: unchanged", self.device_id)
             return None
+        maker = (
+            f", maker {old.manufacturer} -> {new.manufacturer}"
+            if old.manufacturer != new.manufacturer
+            else ""
+        )
         _LOGGER.warning(
-            "Device %s changed after a reconnect: firmware %s -> %s, options %s -> %s%s; "
+            "Device %s changed after a reconnect: firmware %s -> %s, options %s -> %s%s%s; "
             "quirks rebuilt", self.device_id, old.version, new.version, old.options,
-            new.options, ", model chain changed" if chain_changed else "",
+            new.options, maker, ", model chain changed" if chain_changed else "",
         )  # fmt: skip
         self.device = found
         self.quirks = self._build(self.user)

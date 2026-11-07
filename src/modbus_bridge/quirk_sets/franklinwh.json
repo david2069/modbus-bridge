@@ -3,9 +3,9 @@
   "version": 1,
   "id": "franklinwh",
   "layer": "vendor",
-  "match": {"manufacturer": "FranklinWH"},
+  "match": {"manufacturer": ["FranklinWH", "FranklinWH Technologies Co., Ltd"]},
   "description": "FranklinWH aGate: extension registers as neutral labels N1-N11 and rules R1-R5 (docs/design.md sections 3 and 3a).",
-  "source": "franklinwh-modbus docs/FRANKLINWH_MODBUS_EXTENSIONS.md, commit 0284981 (MIT, Copyright (c) 2026 david2069)",
+  "source": "franklinwh-modbus docs/FRANKLINWH_MODBUS_EXTENSIONS.md, commit 0284981 (MIT, Copyright (c) 2026 david2069); Model 1 maker names: 'FranklinWH' on V12R02B60D00, 'FranklinWH Technologies Co., Ltd' on V10R01B04D00 per the reference scan in franklinwh-gateway-emulator tests/data/reference_scan_static_2026-10-07.json, commit 6663383",
   "quirks": [
     {"id": "fwh-q-dca", "point": "714.DCA", "hide": true,
      "reason": "Battery DC current always read 0 on an aGate X (V10R01B04D00), although the PICS lists it as implemented. Hidden so 0 A is not shown as a real current. Not yet checked on V12R02B60D00: switch this off if your aGate reports a real current.",

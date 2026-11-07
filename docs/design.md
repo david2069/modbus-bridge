@@ -93,7 +93,7 @@ The device catalogue is data, with one entry for each maker and model:
 |---|---|---|
 | Q1 | Shipped quirks (L2–L4) | When the app is updated, on the restart that the update causes. There are no quirk downloads between releases. |
 | Q2 | User quirks (L5) | At the next reading after the user saves, with no restart. |
-| Q3 | Firmware change | Model 1 is read on every connect. A new firmware rebuilds the quirk set at once, and the user is told which quirks now apply. |
+| Q3 | Firmware change | Model 1 is read on every connect. A new firmware rebuilds the quirk set at once, and the user is told which quirks now apply. The same device is the same serial and model; the maker name may change with firmware (the aGate reports two), so a quirk set can list several maker names, matched exactly. Without a serial, the maker is compared too. Any other device at the address is refused. |
 | Q4 | Effect on HA | A new reading creates an entity. A hidden one is removed cleanly. A change of unit or scale to an existing reading warns the user first. |
 
 User quirk lifecycle:

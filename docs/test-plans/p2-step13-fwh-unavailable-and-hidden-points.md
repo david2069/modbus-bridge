@@ -29,7 +29,7 @@ Each item names its source (rule 9) and can be switched off by its id.
 
 ## 4. Not covered
 
-1. **0xFFFF on the int16 PV readings (15502–15505) still shows as -1 W.** Whether the aGate ever sends a real -1 W there has to be measured first (study section 5).
+1. 0xFFFF on the int16 PV readings (15502–15505) reads as -1 W. This is not known to be wrong: a small negative PV power at night is normal for many inverters (standby draw), and no evidence shows the aGate sends 0xFFFF there as "no value". Left as it is unless a measurement shows otherwise (study section 5).
 2. 0xFFFF on the other uint16 readings (15500, 15501, 15507, 15016). Their rules already refuse unknown values (N5, R4, R5), but the raw readings `raw.*` still show 65535. The same fix applies; it is left for a separate yes.
 3. The emulator does not send 0xFFFF, so G1 is tested by unit tests only.
 4. 714.DCA on V12R02B60D00 firmware. If it gives a real current there, the hide should move to a firmware layer for V10.

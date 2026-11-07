@@ -39,7 +39,7 @@ No value is lost: 65535 is not a known flag, mode or status.
 
 ## 4. Not covered
 
-1. **0xFFFF on the int16 PV readings (15502–15505) still shows as -1 W.** This needs measuring first (study section 5).
+1. 0xFFFF on the int16 PV readings (15502–15505) reads as -1 W. This is not known to be wrong: a small negative PV power at night is normal for many inverters (standby draw), and no evidence shows the aGate sends 0xFFFF there as "no value". Left as it is unless a measurement shows otherwise (study section 5).
 2. The emulator does not send 0xFFFF, so the change is tested by unit tests only.
 3. The other extension readings (15510–15513 energy, 15012–15013 and the ratings) are 32-bit or scaled. Whether the aGate sends all-ones there has not been seen in public evidence.
 

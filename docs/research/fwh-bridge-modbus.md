@@ -44,9 +44,8 @@ Purpose: learn what that bridge found about the aGate's Modbus interface, and wh
 
 1. **G1: 0xFFFF from an extension register is published as a value (F1, rule 8).**
    - On the uint16 readings it shows as 65535 W of home load (15506, 16000) or a 65535 % reserve (15508, 15509, 16001).
-   - On the int16 readings it shows as -1 W, which looks like a real small value.
    - Fix: list 0xFFFF as `unavailable` on the uint16 readings in the FranklinWH set; the reading format already supports this.
-   - Open question for the int16 readings: -1 W can be real at night (F2), so the evidence of 0xFFFF on them has to be measured before 65535 is listed there.
+   - Not a gap on the int16 PV readings (15502–15505): there 0xFFFF reads as -1 W, and a small negative PV power at night is normal for many inverters (F2). No evidence shows the aGate sends 0xFFFF there as "no value", so they are left as they are unless a measurement shows otherwise. (Corrected 2026-11-07: this was first listed as wrong data without evidence.)
 2. **G2: 714.DCA shows 0 A as a real current (F9).**
    - Fix: a FranklinWH quirk that hides 714.DCA and `Prt[n].DCA`, with that bridge's measurement as the source.
    - It is measured on V10R01B04D00 only, so this should be a model or firmware quirk once V12 has been checked.
@@ -71,7 +70,7 @@ Purpose: learn what that bridge found about the aGate's Modbus interface, and wh
 
 ## 5. To measure ourselves (emulator first, the real aGate only when the owner arranges it)
 
-1. How often 0xFFFF appears on 15502–15506 and 16000–16001, and whether it is ever a real -1 W (G1).
+1. How often 0xFFFF appears on 15506 and 16000–16001; and whether 15502–15505 ever read -1 W in a way that is not real standby draw (G1).
 2. 714.DCA on V12R02B60D00 (G2).
 3. What 701.DERMode returns on V12R02B60D00 (G3).
 4. Whether reads at base 40000 and base 0 always agree on V12R02B60D00 (G6).
