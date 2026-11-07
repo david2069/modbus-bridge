@@ -3,6 +3,9 @@
 There are no writes to devices here (D10). The user's own quirks (design 2b) are
 created, checked, previewed, removed and switched off here. Each change is added
 to the device's audit log with the token that made it (U5, U8).
+
+A read-only page is served at ``/ui`` (P2U). It holds no data and reads everything
+through the token-protected API.
 """
 
 from __future__ import annotations
@@ -11,10 +14,11 @@ import asyncio
 import hmac
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
+from importlib.resources import files
 from typing import Annotated, Any
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .quirks import QuirkError
 from .service import AuditError, DeviceService, UserQuirksOff, point_json
@@ -100,6 +104,11 @@ def create_app(
     app = FastAPI(title="modbus-bridge", version="1", lifespan=lifespan)
     app.state.tokens = list(tokens)
     auth = [Depends(require_token)]
+
+    @app.get("/ui", include_in_schema=False)
+    async def ui() -> HTMLResponse:
+        page = files("modbus_bridge").joinpath("ui/index.html").read_text(encoding="utf-8")
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
     @app.get(f"{PREFIX}/health")
     async def health() -> dict[str, str]:
@@ -248,7 +257,11 @@ def create_app(
 
 
 def _summary(service: DeviceService) -> dict[str, Any]:
-    summary: dict[str, Any] = {"id": service.device_id, "ready": service.poller is not None}
+    summary: dict[str, Any] = {
+        "id": service.device_id,
+        "ready": service.poller is not None,
+        "interval": service.interval,
+    }
     if service.device is not None:
         ident = service.device.identity
         summary["identity"] = {

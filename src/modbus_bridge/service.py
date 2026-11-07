@@ -187,6 +187,11 @@ class DeviceService:
         self._unsubscribe_lost: Callable[[], None] | None = None
 
     @property
+    def interval(self) -> float:
+        """Seconds between polls."""
+        return self._interval
+
+    @property
     def implemented(self) -> ImplementedPoints:
         if self.poller is None:
             raise RuntimeError("service not started")

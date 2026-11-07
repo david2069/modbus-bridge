@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modbus-bridge</title>
+<!-- Read-only page (design P2U). It holds no data: everything comes from the
+     token-protected API. Nothing is loaded from outside the bridge. -->
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #6b6560; --line: #e2dfdb; --panel: #ffffff;
+    --live: #166534; --warn: #92400e; --bad: #991b1b; --accent: #1d4ed8; --missing: #9a3412;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161514; --fg: #ebe8e4; --muted: #a29d97; --line: #34312e; --panel: #1f1d1b;
+      --live: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #93b4ff; --missing: #fdba74;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline;
+           padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .fetched { color: var(--muted); font-size: 13px; }
+  header button { margin-left: auto; }
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  form.token { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input, button, select { font: inherit; color: inherit; background: var(--panel);
+                          border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .banner { padding: 10px 12px; border-radius: 6px; margin: 0 0 12px;
+            border: 1px solid var(--bad); color: var(--bad); }
+  .devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+             gap: 10px; margin-bottom: 16px; }
+  .device { text-align: left; padding: 10px 12px; background: var(--panel); }
+  .device[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .device .id { font-weight: 600; }
+  .device .who, .device .why { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .state { font-weight: 600; }
+  .state.live { color: var(--live); } .state.failing, .state.not-ready { color: var(--warn); }
+  .state.refused { color: var(--bad); }
+  nav { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
+  nav button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  nav input { margin-left: auto; min-width: 0; flex: 0 1 240px; }
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: 12px; position: sticky; top: 0;
+       background: var(--panel); }
+  td.key, td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+                    overflow-wrap: anywhere; }
+  td.num { font-variant-numeric: tabular-nums; }
+  td.id { white-space: nowrap; }
+  .missing { color: var(--missing); font-style: italic; }
+  .small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+  .stale table, .stale .devices { opacity: 0.55; }
+  h2 { font-size: 14px; margin: 18px 0 8px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>modbus-bridge</h1>
+  <span class="fetched" id="fetched"></span>
+  <button id="forget" class="hidden" type="button">Forget token</button>
+</header>
+<main>
+  <div id="error" class="banner hidden" role="alert"></div>
+  <form class="token" id="token-form">
+    <label for="token">API token</label>
+    <input id="token" type="password" autocomplete="off" required>
+    <button type="submit">Show</button>
+    <span class="small">Kept in this browser tab only.</span>
+  </form>
+  <div id="content" class="hidden">
+    <div class="devices" id="devices"></div>
+    <nav role="tablist">
+      <button type="button" role="tab" data-tab="points" aria-selected="true">Points</button>
+      <button type="button" role="tab" data-tab="quirks" aria-selected="false">Quirks</button>
+      <button type="button" role="tab" data-tab="audit" aria-selected="false">Audit log</button>
+      <input id="filter" type="search" placeholder="Filter by key or label" aria-label="Filter points">
+    </nav>
+    <section id="panel"></section>
+  </div>
+</main>
+<script>
+"use strict";
+const API = "/api/v1";
+const KEY = "modbus-bridge-token";
+let token = null, selected = null, tab = "points", timer = null, lastOk = null;
+let devices = [], points = null, quirks = null, audit = null;
+
+const $ = (id) => document.getElementById(id);
+
+function store(op, value) {
+  try {
+    if (op === "get") return sessionStorage.getItem(KEY);
+    if (op === "set") sessionStorage.setItem(KEY, value);
+    if (op === "del") sessionStorage.removeItem(KEY);
+  } catch (e) { /* storage blocked: the token lasts until the page is closed */ }
+  return null;
+}
+
+/** Build an element; text is always set as text, never as HTML. */
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") node.className = v; else node.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined) continue;
+    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+
+class ApiError extends Error {
+  constructor(status, detail) { super(detail); this.status = status; }
+}
+
+async function get(path) {
+  const res = await fetch(API + path, { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* no JSON body */ }
+  if (!res.ok) {
+    const detail = body && body.detail ? body.detail : res.statusText;
+    throw new ApiError(res.status, `${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  return body;
+}
+
+function stateOf(d) {
+  if (d.refused) return ["refused", d.refused];
+  if (!d.ready) return ["not ready", null];
+  if (d.last_error) return ["failing", d.last_error];
+  return ["live", null];
+}
+
+/** A value as text; null is "no value" (rule 8), never blank or 0. */
+function show(value, point) {
+  if (value === null || value === undefined || (point && point.available === false)) {
+    return el("span", { class: "missing" }, "no value");
+  }
+  if (typeof value === "object") {
+    if (Array.isArray(value.names)) return `${value.names.join(", ") || "none"} (${value.value})`;
+    if ("name" in value) return `${value.name} (${value.value})`;
+    return JSON.stringify(value);
+  }
+  if (point && Array.isArray(point.options)) {
+    const match = point.options.find((o) => Array.isArray(o) && o[0] === value);
+    if (match) return `${match[1]} (${value})`;
+  }
+  return String(value);
+}
+
+function renderDevices() {
+  const box = $("devices");
+  box.replaceChildren(...devices.map((d) => {
+    const [state, why] = stateOf(d);
+    const id = d.identity || {};
+    const who = [id.manufacturer, id.model, id.version && `firmware ${id.version}`,
+                 id.serial ? `serial ${id.serial}` : "no serial"].filter(Boolean).join(" · ");
+    const button = el("button", { class: "device", type: "button", "aria-pressed": String(d.id === selected) },
+      el("div", null, el("span", { class: "id" }, d.id), " ",
+         el("span", { class: "state " + state.replace(" ", "-") }, state)),
+      el("div", { class: "who" }, d.identity ? who : "identity not read yet"),
+      why ? el("div", { class: "why" }, why) : null);
+    button.addEventListener("click", () => { selected = d.id; points = quirks = audit = null; refresh(); });
+    return button;
+  }));
+}
+
+function table(headers, rows) {
+  return el("div", { class: "wrap" }, el("table", null,
+    el("thead", null, el("tr", null, headers.map((h) => el("th", null, h)))),
+    el("tbody", null, rows)));
+}
+
+function renderPoints() {
+  if (!points) return [el("p", { class: "small" }, "Loading…")];
+  const f = $("filter").value.trim().toLowerCase();
+  const all = Object.values(points.points);
+  const shown = all.filter((p) => !f || p.key.toLowerCase().includes(f) || (p.label || "").toLowerCase().includes(f));
+  const missing = all.filter((p) => p.value === null || p.available === false).length;
+  return [
+    el("p", { class: "small" }, `${shown.length} of ${all.length} points shown; ${missing} with no value.`),
+    table(["Key", "Label", "Value", "Units", "Quirks"], shown.map((p) => el("tr", null,
+      el("td", { class: "key" }, p.key),
+      el("td", null, p.label || ""),
+      el("td", { class: "num" }, show(p.value, p)),
+      el("td", null, p.units || ""),
+      el("td", { class: "small" }, (p.quirks || []).join(", "))))),
+  ];
+}
+
+function itemRows(items, cols) {
+  return items.map((q) => el("tr", null,
+    el("td", { class: "mono id" }, q.id),
+    cols.map((c) => el("td", { class: c === "point" ? "mono" : null }, q[c] === null || q[c] === undefined ? "" : String(q[c]))),
+    el("td", null, el("span", { class: q.state === "failing" ? "missing" : null }, q.state), q.error ? el("div", { class: "small" }, q.error) : null),
+    el("td", { class: "small" }, q.reason || ""),
+    el("td", { class: "small" }, q.source || "")));
+}
+
+function renderQuirks() {
+  if (!quirks) return [el("p", { class: "small" }, "Loading…")];
+  const out = [
+    el("h2", null, "Quirk sets that apply"),
+    quirks.sets.length
+      ? table(["Set", "Layer", "Match", "Source"], quirks.sets.map((s) => el("tr", null,
+          el("td", { class: "mono id" }, s.id), el("td", null, s.layer),
+          el("td", { class: "small" }, JSON.stringify(s.match)), el("td", { class: "small" }, s.source))))
+      : el("p", { class: "small" }, "None."),
+  ];
+  for (const [name, title, cols] of [["quirks", "Quirks", ["point", "layer"]],
+                                     ["readings", "Raw readings", ["point", "address"]],
+                                     ["rules", "Rules", ["point", "label"]],
+                                     ["constants", "Constants", ["name", "value"]]]) {
+    const items = quirks[name] || [];
+    if (!items.length) continue;
+    out.push(el("h2", null, `${title} (${items.length})`),
+             table(["Id", ...cols.map((c) => c[0].toUpperCase() + c.slice(1)), "State", "Reason", "Source"], itemRows(items, cols)));
+  }
+  if (quirks.not_matched && quirks.not_matched.length) {
+    out.push(el("p", { class: "small" }, "Sets loaded but not matching this device: " + quirks.not_matched.join(", ")));
+  }
+  return out;
+}
+
+function renderAudit() {
+  if (!audit) return [el("p", { class: "small" }, "Loading…")];
+  if (audit.off) return [el("p", { class: "small" }, "User quirks are off for this bridge, so there is no audit log.")];
+  if (!audit.entries.length) return [el("p", { class: "small" }, "No changes yet.")];
+  return [table(["Time", "Who", "Action", "Item", "Version", "Reason"],
+    audit.entries.slice().reverse().map((e) => el("tr", null,
+      el("td", { class: "mono" }, e.time), el("td", null, e.who), el("td", null, e.action),
+      el("td", { class: "mono" }, `${e.kind || ""} ${e.id || ""}`.trim()),
+      el("td", { class: "num" }, e.version === null || e.version === undefined ? "" : e.version),
+      el("td", { class: "small" }, e.reason || ""))))];
+}
+
+function render() {
+  renderDevices();
+  for (const b of document.querySelectorAll("nav [data-tab]")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  $("filter").classList.toggle("hidden", tab !== "points");
+  const parts = tab === "points" ? renderPoints() : tab === "quirks" ? renderQuirks() : renderAudit();
+  $("panel").replaceChildren(...parts);
+}
+
+function fail(message) {
+  const box = $("error");
+  box.textContent = lastOk
+    ? `${message}. The values below were fetched at ${lastOk.toLocaleTimeString()} and are not live.`
+    : message;
+  box.classList.remove("hidden");
+  $("content").classList.add("stale");
+}
+
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    devices = await get("/devices");
+    if (!devices.some((d) => d.id === selected)) selected = devices.length ? devices[0].id : null;
+    if (selected) {
+      const dev = encodeURIComponent(selected);
+      points = await get(`/devices/${dev}/points`);
+      if (tab === "quirks") {
+        try { quirks = await get(`/devices/${dev}/quirks`); }
+        catch (e) { if (e.status === 503) quirks = { sets: [], not_matched: [] }; else throw e; }
+      }
+      if (tab === "audit") {
+        try { audit = await get(`/devices/${dev}/user-quirks/audit`); }
+        catch (e) { if (e.status === 409) audit = { off: true }; else throw e; }
+      }
+    }
+    lastOk = new Date();
+    $("fetched").textContent = `Fetched ${lastOk.toLocaleTimeString()}`;
+    $("error").classList.add("hidden");
+    $("content").classList.remove("stale");
+    $("content").classList.remove("hidden");
+    render();
+  } catch (e) {
+    if (e.status === 401) { signOut(); fail("The API refused the token (" + e.message + ")"); lastOk = null; return; }
+    fail("Refresh failed: " + e.message);
+  }
+  const d = devices.find((x) => x.id === selected);
+  const seconds = Math.max(1, (d && d.interval) || 5);
+  timer = setTimeout(refresh, seconds * 1000);
+}
+
+function signOut() {
+  clearTimeout(timer);
+  token = null; store("del");
+  devices = []; points = quirks = audit = null; lastOk = null;
+  $("content").classList.add("hidden");
+  $("panel").replaceChildren(); $("devices").replaceChildren();
+  $("fetched").textContent = "";
+  $("token-form").classList.remove("hidden");
+  $("forget").classList.add("hidden");
+}
+
+function signIn(value) {
+  token = value; store("set", value);
+  $("token-form").classList.add("hidden");
+  $("forget").classList.remove("hidden");
+  $("error").classList.add("hidden");
+  refresh();
+}
+
+$("token-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const value = $("token").value.trim();
+  $("token").value = "";
+  if (value) signIn(value);
+});
+$("forget").addEventListener("click", signOut);
+$("filter").addEventListener("input", () => { if (tab === "points") $("panel").replaceChildren(...renderPoints()); });
+for (const b of document.querySelectorAll("nav [data-tab]")) {
+  b.addEventListener("click", () => { tab = b.dataset.tab; render(); refresh(); });
+}
+const saved = store("get");
+if (saved) signIn(saved);
+</script>
+</body>
+</html>
