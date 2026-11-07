@@ -29,6 +29,7 @@ from .service import (
     identity_json,
     point_json,
 )
+from .sunspec_models import definition
 from .user_quirks import check_kind
 
 PREFIX = "/api/v1"
@@ -135,7 +136,12 @@ def create_app(
         detail = _summary(service)
         if service.device is not None:
             detail["chain"] = [
-                {"model_id": m.model_id, "address": m.address, "length": m.length}
+                {
+                    "model_id": m.model_id,
+                    "name": model_name(m.model_id),
+                    "address": m.address,
+                    "length": m.length,
+                }
                 for m in service.device.chain
             ]
         if service.poller is not None:
@@ -265,6 +271,14 @@ def create_app(
         )
 
     return app
+
+
+def model_name(model_id: int) -> str | None:
+    """The model's label from the official SunSpec definition, or ``None`` if we have none."""
+    found = definition(model_id)
+    group = found.get("group") if found else None
+    label = group.get("label") if isinstance(group, dict) else None
+    return label if isinstance(label, str) and label else None
 
 
 def _summary(service: DeviceService) -> dict[str, Any]:

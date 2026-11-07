@@ -25,7 +25,7 @@
   header h1 { font-size: 16px; margin: 0; }
   header .fetched { color: var(--muted); font-size: 13px; }
   header button { margin-left: auto; }
-  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  main { padding: 16px; max-width: 1400px; margin: 0 auto; }
   form.token { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   input, button, select { font: inherit; color: inherit; background: var(--panel);
                           border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
@@ -54,11 +54,30 @@
   td.key, td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
                     overflow-wrap: anywhere; }
   td.num { font-variant-numeric: tabular-nums; }
-  td.id { white-space: nowrap; }
+  td.id, td.key { white-space: nowrap; }
   .missing { color: var(--missing); font-style: italic; }
   .small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
   .stale table, .stale .devices { opacity: 0.55; }
   h2 { font-size: 14px; margin: 18px 0 8px; }
+  .explorer { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .groups { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px;
+            position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow-y: auto; }
+  .groups button { display: grid; grid-template-columns: 3.6em minmax(0, 1fr) auto; gap: 6px; width: 100%;
+                   text-align: left; border: 0; border-left: 3px solid transparent; border-radius: 0;
+                   padding: 5px 8px; background: none; }
+  .groups button:hover { background: var(--bg); }
+  .groups button[aria-pressed="true"] { border-left-color: var(--accent); background: var(--bg); }
+  .groups .num-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+                    color: var(--accent); }
+  .groups .name { overflow-wrap: anywhere; }
+  .groups .count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+  .groups .count .missing { display: block; }
+  .group-title { font-size: 15px; margin: 2px 0 6px; }
+  .group-title .num-id { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @media (max-width: 700px) {
+    .explorer { grid-template-columns: minmax(0, 1fr); }
+    .groups { position: static; max-height: 240px; }
+  }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -82,7 +101,7 @@
       <button type="button" role="tab" data-tab="points" aria-selected="true">Points</button>
       <button type="button" role="tab" data-tab="quirks" aria-selected="false">Quirks</button>
       <button type="button" role="tab" data-tab="audit" aria-selected="false">Audit log</button>
-      <input id="filter" type="search" placeholder="Filter by key or label" aria-label="Filter points">
+      <input id="filter" type="search" placeholder="Filter models or points" aria-label="Filter models or points">
     </nav>
     <section id="panel"></section>
   </div>
@@ -92,7 +111,7 @@
 const API = "/api/v1";
 const KEY = "modbus-bridge-token";
 let token = null, selected = null, tab = "points", timer = null, lastOk = null;
-let devices = [], points = null, quirks = null, audit = null;
+let devices = [], detail = null, points = null, quirks = null, audit = null, group = "all";
 
 const $ = (id) => document.getElementById(id);
 
@@ -170,7 +189,10 @@ function renderDevices() {
          el("span", { class: "state " + state.replace(" ", "-") }, state)),
       el("div", { class: "who" }, d.identity ? who : "identity not read yet"),
       why ? el("div", { class: "why" }, why) : null);
-    button.addEventListener("click", () => { selected = d.id; points = quirks = audit = null; refresh(); });
+    button.addEventListener("click", () => {
+      if (d.id !== selected) group = "all";
+      selected = d.id; detail = points = quirks = audit = null; refresh();
+    });
     return button;
   }));
 }
@@ -181,21 +203,69 @@ function table(headers, rows) {
     el("tbody", null, rows)));
 }
 
+const OTHER = { label: "Labels", raw: "Raw readings" };
+
+/** The groups of points: one per model in the chain (keys as the bridge builds them,
+ *  "702" then "702#2"), then quirk-set points, then any other key prefix. */
+function groupsOf(all) {
+  const groups = new Map(), seen = {};
+  for (const m of (detail && detail.chain) || []) {
+    seen[m.model_id] = (seen[m.model_id] || 0) + 1;
+    const id = seen[m.model_id] === 1 ? String(m.model_id) : `${m.model_id}#${seen[m.model_id]}`;
+    groups.set(id, { id, num: id, name: m.name || "unknown model", points: [] });
+  }
+  for (const [id, name] of Object.entries(OTHER)) groups.set(id, { id, num: "", name, points: [] });
+  for (const p of all) {
+    const prefix = p.key.split(".")[0];
+    if (!groups.has(prefix)) {
+      groups.set(prefix, { id: prefix, num: /^\d/.test(prefix) ? prefix : "", name: /^\d/.test(prefix) ? "unknown model" : prefix, points: [] });
+    }
+    groups.get(prefix).points.push(p);
+  }
+  return [...groups.values()].filter((g) => g.points.length);
+}
+
+const noValue = (p) => p.value === null || p.value === undefined || p.available === false;
+
 function renderPoints() {
   if (!points) return [el("p", { class: "small" }, "Loading…")];
   const f = $("filter").value.trim().toLowerCase();
   const all = Object.values(points.points);
-  const shown = all.filter((p) => !f || p.key.toLowerCase().includes(f) || (p.label || "").toLowerCase().includes(f));
-  const missing = all.filter((p) => p.value === null || p.available === false).length;
-  return [
-    el("p", { class: "small" }, `${shown.length} of ${all.length} points shown; ${missing} with no value.`),
-    table(["Key", "Label", "Value", "Units", "Quirks"], shown.map((p) => el("tr", null,
-      el("td", { class: "key" }, p.key),
-      el("td", null, p.label || ""),
-      el("td", { class: "num" }, show(p.value, p)),
-      el("td", null, p.units || ""),
-      el("td", { class: "small" }, (p.quirks || []).join(", "))))),
-  ];
+  const hit = (p) => p.key.toLowerCase().includes(f) || (p.label || "").toLowerCase().includes(f);
+  const groups = groupsOf(all).map((g) => {
+    const whole = !f || `${g.num} ${g.name}`.toLowerCase().includes(f);
+    return { ...g, shown: whole ? g.points : g.points.filter(hit) };
+  });
+  const allShown = groups.flatMap((g) => g.shown);
+  const entries = [{ id: "all", num: "", name: "All points", points: all, shown: allShown }, ...groups];
+  if (!entries.some((g) => g.id === group)) group = "all";
+  const current = entries.find((g) => g.id === group);
+
+  const list = el("nav", { class: "groups", "aria-label": "Models" }, entries
+    .filter((g) => !f || g.shown.length || g.id === "all" || g.id === group)
+    .map((g) => {
+      const missing = g.points.filter(noValue).length;
+      const button = el("button", { type: "button", "aria-pressed": String(g.id === group), "data-group": g.id },
+        el("span", { class: "num-id" }, g.num),
+        el("span", { class: "name" }, g.name),
+        el("span", { class: "count" }, f ? `${g.shown.length}/${g.points.length}` : g.points.length,
+           missing ? el("span", { class: "missing" }, `${missing} no value`) : null));
+      button.addEventListener("click", () => { group = g.id; $("panel").replaceChildren(...renderPoints()); });
+      return button;
+    }));
+
+  const missing = current.points.filter(noValue).length;
+  const rows = current.shown.map((p) => el("tr", null,
+    el("td", { class: "key" }, p.key),
+    el("td", null, p.label || ""),
+    el("td", { class: "num" }, show(p.value, p)),
+    el("td", null, p.units || ""),
+    el("td", { class: "small" }, (p.quirks || []).join(", "))));
+  const body = el("div", null,
+    el("h2", { class: "group-title" }, current.num ? el("span", { class: "num-id" }, current.num + " ") : null, current.name),
+    el("p", { class: "small" }, `${current.shown.length} of ${current.points.length} points shown; ${missing} with no value.`),
+    rows.length ? table(["Key", "Label", "Value", "Units", "Quirks"], rows) : el("p", { class: "small" }, "No points match the filter."));
+  return [el("div", { class: "explorer" }, list, body)];
 }
 
 function itemRows(items, cols) {
@@ -268,6 +338,7 @@ async function refresh() {
     if (!devices.some((d) => d.id === selected)) selected = devices.length ? devices[0].id : null;
     if (selected) {
       const dev = encodeURIComponent(selected);
+      detail = await get(`/devices/${dev}`);
       points = await get(`/devices/${dev}/points`);
       if (tab === "quirks") {
         try { quirks = await get(`/devices/${dev}/quirks`); }
@@ -296,7 +367,7 @@ async function refresh() {
 function signOut() {
   clearTimeout(timer);
   token = null; store("del");
-  devices = []; points = quirks = audit = null; lastOk = null;
+  devices = []; detail = points = quirks = audit = null; lastOk = null; group = "all";
   $("content").classList.add("hidden");
   $("panel").replaceChildren(); $("devices").replaceChildren();
   $("fetched").textContent = "";
