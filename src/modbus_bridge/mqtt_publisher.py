@@ -142,7 +142,8 @@ def sensor_classes(point: Mapping[str, Any]) -> dict[str, str]:
 
 
 class IdentityError(ValueError):
-    """The device has no Model 1 serial, so it cannot be given a stable identity."""
+    """The device has no Model 1 serial, so it cannot be given a stable identity,
+    or it reports another serial than the one the publisher started with."""
 
 
 @dataclass(frozen=True)
@@ -164,19 +165,41 @@ class DiscoveryPublisher:
                 "it cannot be given a stable Home Assistant identity"
             )
         self.prefix = prefix
+        self.serial = serial
         self.device_id = slug(serial)
         self.base = f"{prefix}/{self.device_id}"
         self.availability_topic = f"{self.base}/availability"
+        self.device = self._device_info(identity)
+
+    def _device_info(self, identity: Mapping[str, Any]) -> dict[str, Any]:
         maker = identity.get("manufacturer") or "SunSpec"
         model = identity.get("model") or "device"
-        self.device = {
-            "identifiers": [f"{prefix}_{self.device_id}"],
-            "name": f"{maker} {model} {serial[-8:]}",
+        return {
+            "identifiers": [f"{self.prefix}_{self.device_id}"],
+            "name": f"{maker} {model} {self.serial[-8:]}",
             "manufacturer": maker,
             "model": model,
-            "serial_number": serial,
+            "serial_number": self.serial,
             **({"sw_version": identity["version"]} if identity.get("version") else {}),
         }
+
+    def update_identity(self, identity: Mapping[str, Any]) -> bool:
+        """Take a new identity of the same device; ``True`` if the HA device info changed.
+
+        Another serial is refused: its data must never go out under this device's
+        entities (rule 8).
+        """
+        serial = identity.get("serial")
+        if serial != self.serial:
+            raise IdentityError(
+                f"The device now reports serial {serial!r}, but this publisher started "
+                f"for {self.serial!r}; it stops rather than publish another device's data"
+            )
+        device = self._device_info(identity)
+        if device == self.device:
+            return False
+        self.device = device
+        return True
 
     def _topics(self, key: str) -> tuple[str, str, str, str]:
         point_slug = slug(key)

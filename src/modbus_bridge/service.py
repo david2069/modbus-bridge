@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, Flag
 from typing import Any
@@ -31,6 +32,28 @@ _LOGGER = logging.getLogger(__name__)
 
 #: What a subscriber receives per poll: sequence, changed points, removed keys.
 Update = tuple[int, list[PointState], list[str]]
+
+
+@dataclass(frozen=True)
+class DeviceChanged:
+    """Sent to subscribers when a check after a reconnect finds the same device with
+    other firmware or options: its new identity, as in the API's device answer."""
+
+    identity: dict[str, Any]
+
+
+def identity_json(identity: DeviceIdentity) -> dict[str, Any]:
+    """A Model 1 identity as JSON, as the API's device answer shows it."""
+    return {
+        "manufacturer": identity.manufacturer,
+        "model": identity.model,
+        "options": identity.options,
+        "version": identity.version,
+        "serial": identity.serial,
+        "device_address": identity.device_address,
+    }
+
+
 #: Changes a slow subscriber may fall behind by before it is dropped. A dropped
 #: subscriber reconnects and starts again from a snapshot.
 QUEUE_SIZE = 2000
@@ -176,7 +199,7 @@ class DeviceService:
         self.device: SunSpecDevice | None = None
         self.poller: Poller | None = None
         self.sequence = 0
-        self._subscribers: set[asyncio.Queue[Update | None]] = set()
+        self._subscribers: set[asyncio.Queue[Update | DeviceChanged | None]] = set()
         self._task: asyncio.Task[None] | None = None
         self._recheck = False
         """Set when the link may have been rebuilt: check the device before the next poll."""
@@ -289,6 +312,8 @@ class DeviceService:
         self.poller.quirks = self.quirks
         if chain_changed:
             self.poller.rebind(found.chain, await self._implemented(found))
+        if old != new:
+            self._send(DeviceChanged(identity_json(new)))
         return None
 
     def _build(self, user: UserQuirks) -> ActiveQuirks:
@@ -544,8 +569,8 @@ class DeviceService:
             except Exception:
                 _LOGGER.exception("Poll of %s failed unexpectedly", self.device_id)
 
-    def subscribe(self) -> asyncio.Queue[Update | None]:
-        queue: asyncio.Queue[Update | None] = asyncio.Queue(QUEUE_SIZE)
+    def subscribe(self) -> asyncio.Queue[Update | DeviceChanged | None]:
+        queue: asyncio.Queue[Update | DeviceChanged | None] = asyncio.Queue(QUEUE_SIZE)
         self._subscribers.add(queue)
         return queue
 
@@ -555,9 +580,12 @@ class DeviceService:
     def _publish(
         self, sequence: int, changes: Sequence[PointState], removed: Sequence[str] = ()
     ) -> None:
+        self._send((sequence, list(changes), list(removed)))
+
+    def _send(self, item: Update | DeviceChanged) -> None:
         for queue in list(self._subscribers):
             try:
-                queue.put_nowait((sequence, list(changes), list(removed)))
+                queue.put_nowait(item)
             except asyncio.QueueFull:
                 _LOGGER.warning("Dropping a slow subscriber of %s", self.device_id)
                 self._close(queue)

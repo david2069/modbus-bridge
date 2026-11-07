@@ -21,7 +21,14 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .quirks import QuirkError
-from .service import AuditError, DeviceService, UserQuirksOff, point_json
+from .service import (
+    AuditError,
+    DeviceChanged,
+    DeviceService,
+    UserQuirksOff,
+    identity_json,
+    point_json,
+)
 from .user_quirks import check_kind
 
 PREFIX = "/api/v1"
@@ -46,7 +53,8 @@ def snapshot_json(service: DeviceService) -> dict[str, Any]:
 
 async def event_stream(service: DeviceService, keepalive: float = KEEPALIVE) -> AsyncIterator[str]:
     """A snapshot first, then a ``change`` event per changed point and a ``removed``
-    event per point a quirk took away (D9)."""
+    event per point a quirk took away (D9). A ``device`` event gives the new identity
+    when the same device is found with other firmware or options after a reconnect."""
     queue = service.subscribe()
     try:
         yield sse("snapshot", service.sequence, snapshot_json(service))
@@ -58,6 +66,9 @@ async def event_stream(service: DeviceService, keepalive: float = KEEPALIVE) -> 
                 continue
             if item is None:
                 return
+            if isinstance(item, DeviceChanged):
+                yield sse("device", service.sequence, {"identity": item.identity})
+                continue
             sequence, changes, removed = item
             for state in changes:
                 yield sse("change", sequence, point_json(state))
@@ -263,15 +274,7 @@ def _summary(service: DeviceService) -> dict[str, Any]:
         "interval": service.interval,
     }
     if service.device is not None:
-        ident = service.device.identity
-        summary["identity"] = {
-            "manufacturer": ident.manufacturer,
-            "model": ident.model,
-            "options": ident.options,
-            "version": ident.version,
-            "serial": ident.serial,
-            "device_address": ident.device_address,
-        }
+        summary["identity"] = identity_json(service.device.identity)
     if service.poller is not None:
         summary["implemented_points"] = len(service.implemented.implemented)
         summary["implemented_source"] = service.implemented.source

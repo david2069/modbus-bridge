@@ -9,6 +9,9 @@ snapshot publishes every entity and state, each change publishes that
 point's state, and each removal deletes that point's entity. After each
 snapshot it also deletes this device's entities that the broker still keeps
 but the snapshot no longer has (from changes made while it was not running).
+A ``device`` event (new firmware or options) sends every entity config again
+with the new device info. The device answer is read again on each reconnect
+to the API. If the device reports another serial, the publisher stops.
 
 Every stop marks the device offline in Home Assistant: Ctrl-C and SIGTERM
 publish ``offline`` before disconnecting, and the broker's last will covers
@@ -116,6 +119,8 @@ async def follow(
     """Publish from the event stream until it ends or fails."""
     sent: dict[str, str] = {}
     """The discovery config last sent for each point, to send it again when it changes."""
+    configured: dict[str, dict[str, Any]] = {}
+    """The point each sent config was built from, to build it again for new device info."""
     parser = SseParser()
     url = f"{base}/api/v1/devices/{device_id}/events"
     async with http.stream("GET", url) as response:
@@ -128,6 +133,7 @@ async def follow(
             if event.event == "snapshot":
                 points = data["points"]
                 sent = {key: publisher.discovery(p).payload for key, p in points.items()}
+                configured = dict(points)
                 count = await _publish(client, publisher.snapshot(points))
                 _LOGGER.info("Snapshot: %d points, %d messages", len(points), count)
                 await remove_stale(client, publisher, points)
@@ -140,11 +146,20 @@ async def follow(
                     if sent.get(data["key"]) != config.payload:
                         messages.append(config)
                         sent[data["key"]] = config.payload
+                        configured[data["key"]] = data
                 await _publish(client, [*messages, *publisher.state(data)])
             elif event.event == "removed":
                 sent.pop(data["key"], None)
+                configured.pop(data["key"], None)
                 await _publish(client, publisher.remove(data["key"]))
                 _LOGGER.info("Removed %s from Home Assistant", data["key"])
+            elif event.event == "device":
+                if publisher.update_identity(data["identity"]):
+                    configs = [publisher.discovery(p) for p in configured.values()]
+                    sent = {key: c.payload for key, c in zip(configured, configs, strict=True)}
+                    await _publish(client, configs)
+                    _LOGGER.info("Device info changed (firmware %s); %d configs sent again",
+                                 data["identity"].get("version"), len(configs))  # fmt: skip
 
 
 async def mark_offline(client: aiomqtt.Client, publisher: DiscoveryPublisher) -> None:
@@ -162,6 +177,11 @@ async def _follow_forever(
 ) -> None:
     while True:
         try:
+            # The device may have changed while the stream was down.
+            detail = await fetch_detail(http, args.api_url, args.device_id)
+            if publisher.update_identity(detail.get("identity") or {}):
+                _LOGGER.info("Device info changed (firmware %s)",
+                             (detail.get("identity") or {}).get("version"))  # fmt: skip
             await follow(client, http, publisher, args.api_url, args.device_id)
             _LOGGER.warning("Event stream ended")
         except httpx.HTTPError as err:
