@@ -6,8 +6,9 @@ Usage:
 Only two things are read from the spreadsheet:
 
 1. the product fields in ALLOWED_INFO from the "Certification Info" sheet, and
-2. the per-model sheets (named by model id): each point and whether it is
-   "unimplemented" or not.
+2. the per-model sheets (named by model id): each point, whether it is
+   "unimplemented" or not, the value the test lab recorded (when it is more
+   than "supported" or "unimplemented"), and its Min and Max.
 
 Nothing else is read, so the test lab's contact details never reach the profile.
 """
@@ -43,6 +44,7 @@ ALLOWED_INFO = {
     "Product Models": "product_models",
 }
 UNIMPLEMENTED = "unimplemented"
+STATUS_VALUES = {"supported", UNIMPLEMENTED}
 HEADER_POINTS = {"ID", "L"}
 
 
@@ -50,6 +52,17 @@ def _text(value: object) -> str:
     if isinstance(value, (datetime, date)):
         return value.strftime("%Y-%m-%d")
     return str(value).strip()
+
+
+def _cell(value: object) -> object:
+    """A number stays a number; anything else becomes stripped text."""
+    if isinstance(value, bool):
+        return _text(value)
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value
+    return _text(value)
 
 
 def convert(path: Path, source_url: str) -> dict:
@@ -65,14 +78,15 @@ def convert(path: Path, source_url: str) -> dict:
     profile["source_url"] = source_url
     profile["source_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    models: dict[str, dict[str, list[str]]] = {}
+    models: dict[str, dict] = {}
     for sheet in workbook.worksheets:
         if not sheet.title.strip().isdigit():
             continue
         implemented: list[str] = []
         not_implemented: list[str] = []
+        details: dict[str, dict] = {}
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            address, point, _subvalue, value = (list(row) + [None] * 4)[:4]
+            address, point, _subvalue, value, _rw, low, high = (list(row) + [None] * 7)[:7]
             if address is None or point is None or not _text(point):
                 continue  # an enum or bitfield symbol row, or blank
             name = _text(point)
@@ -81,10 +95,21 @@ def convert(path: Path, source_url: str) -> dict:
             if value is None or _text(value) == "":
                 raise ValueError(f"{path}: model {sheet.title} point {name} has no value")
             target = not_implemented if _text(value).lower() == UNIMPLEMENTED else implemented
-            target.append(pics_path_to_key_path(name))
+            key_path = pics_path_to_key_path(name)
+            target.append(key_path)
+            detail = {}
+            if _text(value).lower() not in STATUS_VALUES:
+                detail["value"] = _cell(value)
+            if low is not None and _text(low) != "":
+                detail["min"] = _cell(low)
+            if high is not None and _text(high) != "":
+                detail["max"] = _cell(high)
+            if detail:
+                details[key_path] = detail
         models[sheet.title.strip()] = {
             "implemented": implemented,
             "not_implemented": not_implemented,
+            "details": details,
         }
     profile["models"] = models
     return profile

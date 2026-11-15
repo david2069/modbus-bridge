@@ -154,6 +154,13 @@ def create_app(
     async def points(device_id: str) -> dict[str, Any]:
         return snapshot_json(get_service(device_id))
 
+    @app.get(f"{PREFIX}/devices/{{device_id}}/point-info", dependencies=auth)
+    async def point_info(device_id: str) -> dict[str, Any]:
+        service = get_service(device_id)
+        if service.poller is None:
+            raise HTTPException(status_code=503, detail=f"Device {device_id!r} is not ready")
+        return service.point_info()
+
     @app.get(f"{PREFIX}/devices/{{device_id}}/quirks", dependencies=auth)
     async def quirks(device_id: str) -> dict[str, Any]:
         service = get_service(device_id)

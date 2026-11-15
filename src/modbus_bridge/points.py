@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Generator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
 from modbus_connection import ModbusExceptionError, ModbusUnit
@@ -38,6 +38,10 @@ class Point:
     value: Any
     sunspec_type: str | None = None
     """The SunSpec point type, e.g. ``int16``, ``acc32``, ``enum16``."""
+    address: int | None = None
+    """The Modbus address (0-based, holding registers) of the point's first register."""
+    size: int | None = None
+    """How many registers the point takes."""
 
 
 @dataclass(frozen=True)
@@ -82,11 +86,16 @@ def _walk(
     model_id: int,
     scale_factors: set[str],
     top: bool,
-) -> Iterator[Point]:
+    start: int,
+) -> Generator[Point, None, int]:
+    """Yield the points of ``group`` laid out from register ``start``; return where it ends."""
     cls = type(component)
     fields = list(cls.declared_fields)
+    offset = start
     for raw in group.get("points", []):
         name = raw["name"]
+        address = offset
+        offset += int(raw["size"])
         if raw["type"] == "pad":
             continue
         if top and name in ("ID", "L"):
@@ -103,6 +112,8 @@ def _walk(
             writable=raw.get("access") == "RW",
             value=_reported(getattr(component, _field_name(fields, name))),
             sunspec_type=raw["type"],
+            address=address,
+            size=int(raw["size"]),
         )
 
     group_attrs = [*cls._static_groups, *cls._repeating_fields]
@@ -135,14 +146,40 @@ def _walk(
             raise SunSpecError(f"{path}: no generated group for {child['name']!r}")
         for alias, blocks in zip(aliases, instances, strict=True):
             for number, block in enumerate(blocks, start=1):
-                yield from _walk(
+                offset = yield from _walk(
                     block,
                     alias,
                     f"{path}.{alias['name']}[{number}]",
                     model_id,
                     scale_factors,
                     top=False,
+                    start=offset,
                 )
+    return offset
+
+
+def _laid_out(walk: Generator[Point, None, int], model: SunSpecModel, prefix: str) -> list[Point]:
+    """The points, with addresses only if the layout fills the model exactly.
+
+    The model header (ID, L) is 2 registers, then ``length`` registers. If the
+    points we laid out end anywhere else, our addresses would be guesses, so
+    none are given (rule 8).
+    """
+    points: list[Point] = []
+    while True:
+        try:
+            points.append(next(walk))
+        except StopIteration as done:
+            end = done.value
+            break
+    expected = model.address + 2 + model.length
+    if end == expected:
+        return points
+    _LOGGER.warning(
+        "Model %s at %d: points end at %d, not %d; addresses not shown", prefix,
+        model.address, end, expected,
+    )  # fmt: skip
+    return [replace(p, address=None, size=None) for p in points]
 
 
 async def read_model(unit: ModbusUnit, model: SunSpecModel, prefix: str) -> ModelReading:
@@ -156,16 +193,16 @@ async def read_model(unit: ModbusUnit, model: SunSpecModel, prefix: str) -> Mode
         await component.async_update()
         await component.async_update_repeating_groups()
         group = definition["group"]
-        points = list(
-            _walk(
-                component,
-                group,
-                prefix,
-                model.model_id,
-                _referenced_scale_factors(group),
-                top=True,
-            )
+        walk = _walk(
+            component,
+            group,
+            prefix,
+            model.model_id,
+            _referenced_scale_factors(group),
+            top=True,
+            start=model.address,
         )
+        points = _laid_out(walk, model, prefix)
     except (ModbusExceptionError, SunSpecError) as err:
         _LOGGER.warning("Model %s at %d not read: %s", prefix, model.address, err)
         return ModelReading(model, prefix, [], str(err))

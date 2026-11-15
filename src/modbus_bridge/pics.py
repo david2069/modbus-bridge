@@ -21,7 +21,9 @@ from .implemented import ImplementedPoints
 _LOGGER = logging.getLogger(__name__)
 
 PROFILE_FORMAT = "modbus-bridge/pics-profile"
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2
+#: Versions that still load. Version 1 has no certified values or Min/Max.
+READABLE_VERSIONS = (1, 2)
 
 
 def pics_path_to_key_path(name: str) -> str:
@@ -67,12 +69,15 @@ class PicsProfile:
     info: dict[str, Any]
     models: dict[int, dict[str, frozenset[str]]]
     """Model id to ``implemented`` and ``not_implemented`` point paths."""
+    details: dict[int, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    """Model id to point path to ``value`` (as the test lab recorded it), ``min`` and
+    ``max``, each only where the PICS gives one."""
 
     @classmethod
     def load(cls, path: Path) -> PicsProfile:
         data = json.loads(path.read_text())
-        if data.get("format") != PROFILE_FORMAT or data.get("version") != PROFILE_VERSION:
-            raise ValueError(f"{path}: not a version {PROFILE_VERSION} PICS profile")
+        if data.get("format") != PROFILE_FORMAT or data.get("version") not in READABLE_VERSIONS:
+            raise ValueError(f"{path}: not a PICS profile of version {READABLE_VERSIONS}")
         models = {
             int(model_id): {
                 "implemented": frozenset(entry["implemented"]),
@@ -80,8 +85,41 @@ class PicsProfile:
             }
             for model_id, entry in data["models"].items()
         }
+        details = {
+            int(model_id): dict(entry.get("details", {}))
+            for model_id, entry in data["models"].items()
+        }
         info = {k: v for k, v in data.items() if k not in ("models", "format", "version")}
-        return cls(certificate=data["certificate"], info=info, models=models)
+        return cls(certificate=data["certificate"], info=info, models=models, details=details)
+
+
+def pics_status(profile: PicsProfile | None, key: str) -> str | None:
+    """What the PICS says about one point: ``implemented``, ``unimplemented``,
+    ``not listed`` (a model the PICS covers, without this point) or ``model not
+    covered``. ``None`` with no PICS, or for a point not from a SunSpec model."""
+    if profile is None or not re.match(r"^\d+(#\d+)?\.", key):
+        return None
+    entry = profile.models.get(_model_id(key))
+    if entry is None:
+        return "model not covered"
+    path = _path(key)
+    if path in entry["implemented"]:
+        return "implemented"
+    if path in entry["not_implemented"]:
+        return "unimplemented"
+    return "not listed"
+
+
+_NO_DETAILS = {"certified": None, "min": None, "max": None}
+
+
+def pics_details(profile: PicsProfile | None, key: str) -> dict[str, Any]:
+    """The certified value, Min and Max the PICS gives for one point, each ``None``
+    where it gives none. The value is as the test lab recorded it, not scaled."""
+    if profile is None or not re.match(r"^\d+(#\d+)?\.", key):
+        return dict(_NO_DETAILS)
+    found = profile.details.get(_model_id(key), {}).get(_path(key), {})
+    return {"certified": found.get("value"), "min": found.get("min"), "max": found.get("max")}
 
 
 @dataclass

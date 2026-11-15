@@ -8,7 +8,7 @@ import pytest
 from openpyxl import Workbook
 
 from modbus_bridge.implemented import ImplementedPoints
-from modbus_bridge.pics import PicsProfile, apply_pics, pics_path_to_key_path
+from modbus_bridge.pics import PicsProfile, apply_pics, pics_details, pics_path_to_key_path
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,13 +48,15 @@ def test_converter_keeps_only_allowed_fields(tmp_path: Path) -> None:
     testing = book.create_sheet("Testing Info")
     testing.append(("Email", "tester@example.invalid"))
     model = book.create_sheet("713")
-    model.append(("Address", "Point", "Subvalue", "Value", "R/W"))
+    model.append(("Address", "Point", "Subvalue", "Value", "R/W", "Min", "Max", "Notes"))
     model.append((1033, "ID", None, 713, "R"))
     model.append((1034, "L", None, 7, "R"))
-    model.append((1035, "WHRtg", None, "supported", "R"))
+    model.append((1035, "WHRtg", None, "supported", "R", 0, 20000.0))
     model.append((1038, "SoH", None, "unimplemented", "R"))
     model.append((1039, "Sta", None, "supported", "R"))
     model.append((None, "OK", None, "supported", None))  # enum symbol row
+    model.append((1040, "WH_SF", None, 0, "R"))
+    model.append((1041, "Mn", None, " ExampleMaker ", "R", None, 1.5))
     path = tmp_path / "pics.xlsx"
     book.save(path)
 
@@ -73,8 +75,14 @@ def test_converter_keeps_only_allowed_fields(tmp_path: Path) -> None:
         "models",
     }
     assert profile["models"] == {
-        "713": {"implemented": ["WHRtg", "Sta"], "not_implemented": ["SoH"]}
-    }
+        "713": {
+            "implemented": ["WHRtg", "Sta", "WH_SF", "Mn"],
+            "not_implemented": ["SoH"],
+            "details": {"WHRtg": {"min": 0, "max": 20000}, "WH_SF": {"value": 0},
+                        "Mn": {"value": "ExampleMaker", "max": 1.5}},
+        }
+    }  # fmt: skip
+    assert profile["version"] == 2
 
 
 def _profile() -> PicsProfile:
@@ -87,7 +95,48 @@ def _profile() -> PicsProfile:
                 "not_implemented": frozenset({"SoH", "Sta"}),
             }
         },
+        details={713: {"WHRtg": {"value": 13600, "min": 0, "max": 20000}}},
     )
+
+
+def _write(tmp_path: Path, version: int, entry: dict) -> Path:
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps({"format": "modbus-bridge/pics-profile", "version": version,
+                                "certificate": "SM-TEST", "models": {"713": entry}}))  # fmt: skip
+    return path
+
+
+def test_version_1_profile_loads_without_details(tmp_path: Path) -> None:
+    profile = PicsProfile.load(_write(tmp_path, 1, {"implemented": ["SoC"], "not_implemented": []}))
+    assert profile.models[713]["implemented"] == {"SoC"}
+    assert pics_details(profile, "713.SoC") == {"certified": None, "min": None, "max": None}
+
+
+def test_version_2_profile_loads_details(tmp_path: Path) -> None:
+    entry = {"implemented": ["SoC"], "not_implemented": [], "details": {"SoC": {"min": 5}}}
+    profile = PicsProfile.load(_write(tmp_path, 2, entry))
+    assert pics_details(profile, "713#2.SoC") == {"certified": None, "min": 5, "max": None}
+
+
+def test_unknown_profile_version_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not a PICS profile"):
+        PicsProfile.load(_write(tmp_path, 3, {"implemented": [], "not_implemented": []}))
+
+
+def test_details_need_a_pics_and_a_sunspec_key() -> None:
+    none = {"certified": None, "min": None, "max": None}
+    assert pics_details(_profile(), "713.WHRtg") == {"certified": 13600, "min": 0, "max": 20000}
+    assert pics_details(_profile(), "713.SoC") == none
+    assert pics_details(_profile(), "701.W") == none
+    assert pics_details(_profile(), "label.x") == none
+    assert pics_details(None, "713.WHRtg") == none
+
+
+def test_shipped_sm000028_keeps_certified_values_and_ranges() -> None:
+    profile = PicsProfile.load(ROOT / "src/modbus_bridge/pics_profiles/SM-000028.json")
+    assert pics_details(profile, "702.WMax") == {"certified": None, "min": 0, "max": 10000}
+    assert pics_details(profile, "702.WChaRteMaxRtg")["certified"] == 0
+    assert pics_details(profile, "702.WMaxRtg")["certified"] == 10000
 
 
 def test_pics_decides_covered_models_and_discovery_the_rest() -> None:

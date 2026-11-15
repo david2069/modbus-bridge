@@ -78,6 +78,11 @@
     .explorer { grid-template-columns: minmax(0, 1fr); }
     .groups { position: static; max-height: 240px; }
   }
+  .tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 8px; }
+  .tools button { padding: 3px 8px; font-size: 12.5px; }
+  .tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .note { color: var(--warn); }
+  td.nowrap { white-space: nowrap; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -111,7 +116,11 @@
 const API = "/api/v1";
 const KEY = "modbus-bridge-token";
 let token = null, selected = null, tab = "points", timer = null, lastOk = null;
-let devices = [], detail = null, points = null, quirks = null, audit = null, group = "all";
+let devices = [], detail = null, points = null, info = null, quirks = null, audit = null, group = "all";
+let base = 0;
+try { base = localStorage.getItem("modbus-bridge-address-base") === "1" ? 1 : 0; } catch (e) { /* default 0 */ }
+let view = "full";
+try { view = localStorage.getItem("modbus-bridge-view") === "simple" ? "simple" : "full"; } catch (e) { /* default full */ }
 
 const $ = (id) => document.getElementById(id);
 
@@ -191,7 +200,7 @@ function renderDevices() {
       why ? el("div", { class: "why" }, why) : null);
     button.addEventListener("click", () => {
       if (d.id !== selected) group = "all";
-      selected = d.id; detail = points = quirks = audit = null; refresh();
+      selected = d.id; detail = points = info = quirks = audit = null; refresh();
     });
     return button;
   }));
@@ -225,12 +234,44 @@ function groupsOf(all) {
   return [...groups.values()].filter((g) => g.points.length);
 }
 
+/** A point's address in the chosen base; empty for a rule's output, which has none. */
+function addressText(i) {
+  if (i.address === null || i.address === undefined) return "";
+  const a = i.address + base;
+  const text = i.size > 1 ? `${a}–${a + i.size - 1}` : String(a);
+  return i.table === "input" ? `${text} (input)` : text;
+}
+
+function addressTitle(i) {
+  if (i.address === null || i.address === undefined) return null;
+  return `${i.size} register${i.size === 1 ? "" : "s"}, ${i.table || "holding"}, ${base ? "1-based" : "0-based"}`;
+}
+
 const noValue = (p) => p.value === null || p.value === undefined || p.available === false;
+
+/** A PICS entry as text; empty where the PICS gives none. */
+const picsText = (v) => (v === null || v === undefined ? "" : String(v));
+
+/** A switch of buttons that keeps its choice in the browser. */
+function switcher(title, choices, current, keep, set) {
+  return [el("span", { class: "small" }, title),
+    ...choices.map(([value, text]) => {
+      const button = el("button", { type: "button", "aria-pressed": String(current === value) }, text);
+      button.addEventListener("click", () => {
+        set(value);
+        try { localStorage.setItem(keep, String(value)); } catch (e) { /* not kept */ }
+        $("panel").replaceChildren(...renderPoints());
+      });
+      return button;
+    })];
+}
 
 function renderPoints() {
   if (!points) return [el("p", { class: "small" }, "Loading…")];
   const f = $("filter").value.trim().toLowerCase();
-  const all = Object.values(points.points);
+  const every = Object.values(points.points);
+  const simple = view === "simple" && info !== null;
+  const all = simple ? every.filter((p) => (info.points[p.key] || {}).ha_default) : every;
   const hit = (p) => p.key.toLowerCase().includes(f) || (p.label || "").toLowerCase().includes(f);
   const groups = groupsOf(all).map((g) => {
     const whole = !f || `${g.num} ${g.name}`.toLowerCase().includes(f);
@@ -255,16 +296,41 @@ function renderPoints() {
     }));
 
   const missing = current.points.filter(noValue).length;
-  const rows = current.shown.map((p) => el("tr", null,
-    el("td", { class: "key" }, p.key),
-    el("td", null, p.label || ""),
-    el("td", { class: "num" }, show(p.value, p)),
-    el("td", null, p.units || ""),
-    el("td", { class: "small" }, (p.quirks || []).join(", "))));
+  const rows = current.shown.map((p) => {
+    const i = (info && info.points[p.key]) || {};
+    if (simple) {
+      return el("tr", null,
+        el("td", { title: p.key }, p.label || p.key),
+        el("td", { class: "num" }, show(p.value, p)),
+        el("td", null, p.units || ""),
+        el("td", { class: "small" }, (p.quirks || []).join(", ")));
+    }
+    return el("tr", null,
+      el("td", { class: "key" }, p.key),
+      el("td", null, p.label || ""),
+      el("td", { class: "num" }, show(p.value, p)),
+      el("td", null, p.units || ""),
+      el("td", { class: "mono small" }, p.type || ""),
+      el("td", { class: "small" }, p.writable ? "RW" : "R"),
+      el("td", { class: "mono num", title: addressTitle(i) }, addressText(i)),
+      el("td", { class: "small nowrap" + (i.pics && i.pics !== "implemented" ? " note" : "") }, i.pics || ""),
+      el("td", { class: "mono num" }, picsText(i.certified)),
+      el("td", { class: "mono num" }, picsText(i.min)),
+      el("td", { class: "mono num" }, picsText(i.max)),
+      el("td", { class: "small" }, (p.quirks || []).join(", ")));
+  });
   const body = el("div", null,
     el("h2", { class: "group-title" }, current.num ? el("span", { class: "num-id" }, current.num + " ") : null, current.name),
     el("p", { class: "small" }, `${current.shown.length} of ${current.points.length} points shown; ${missing} with no value.`),
-    rows.length ? table(["Key", "Label", "Value", "Units", "Quirks"], rows) : el("p", { class: "small" }, "No points match the filter."));
+    el("div", { class: "tools" },
+      switcher("View:", [["simple", "Simple"], ["full", "Full"]], view, "modbus-bridge-view", (v) => { view = v; }),
+      simple ? null : switcher("Addresses:", [[0, "0-based (on the wire)"], [1, "1-based"]], base, "modbus-bridge-address-base", (b) => { base = b; }),
+      info && info.pics ? el("span", { class: "small" }, `PICS: ${info.pics.certificate}`) : el("span", { class: "small" }, "No PICS loaded")),
+    view === "simple" && info === null ? el("p", { class: "small note" }, "Point details are not loaded yet, so every point is shown.") : null,
+    rows.length
+      ? table(simple ? ["Label", "Value", "Units", "Quirks"]
+                     : ["Key", "Label", "Value", "Units", "Type", "Access", "Address", "PICS", "Certified", "Min", "Max", "Quirks"], rows)
+      : el("p", { class: "small" }, "No points match the filter."));
   return [el("div", { class: "explorer" }, list, body)];
 }
 
@@ -340,6 +406,8 @@ async function refresh() {
       const dev = encodeURIComponent(selected);
       detail = await get(`/devices/${dev}`);
       points = await get(`/devices/${dev}/points`);
+      try { info = await get(`/devices/${dev}/point-info`); }
+      catch (e) { if (e.status === 503) info = null; else throw e; }
       if (tab === "quirks") {
         try { quirks = await get(`/devices/${dev}/quirks`); }
         catch (e) { if (e.status === 503) quirks = { sets: [], not_matched: [] }; else throw e; }
@@ -367,7 +435,7 @@ async function refresh() {
 function signOut() {
   clearTimeout(timer);
   token = null; store("del");
-  devices = []; detail = points = quirks = audit = null; lastOk = null; group = "all";
+  devices = []; detail = points = info = quirks = audit = null; lastOk = null; group = "all";
   $("content").classList.add("hidden");
   $("panel").replaceChildren(); $("devices").replaceChildren();
   $("fetched").textContent = "";

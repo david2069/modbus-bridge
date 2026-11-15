@@ -42,6 +42,12 @@ class PointState:
     """For a rule's output: the only values it can have, if the rule lists them."""
     total: bool = False
     """The value only counts up over the device's life (a lifetime energy total)."""
+    address: int | None = field(default=None, compare=False)
+    """Where the point is read: the 0-based Modbus address of its first register."""
+    size: int | None = field(default=None, compare=False)
+    """How many registers the point takes."""
+    table: str | None = field(default=None, compare=False)
+    """``holding`` or ``input``; ``None`` for a point not read from registers (a rule)."""
 
     @property
     def available(self) -> bool:
@@ -150,6 +156,9 @@ class Poller:
                 writable=point.writable,
                 value=point.value,
                 sunspec_type=point.sunspec_type,
+                address=point.address,
+                size=point.size,
+                table=None if point.address is None else "holding",
             )
             for reading in readings
             for point in reading.points

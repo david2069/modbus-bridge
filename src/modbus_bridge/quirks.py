@@ -29,7 +29,7 @@ from .evaluator import (
     parse_constant,
     parse_rule,
 )
-from .raw import RawReading, RawReadingError, RawResult, by_name, parse_reading
+from .raw import TYPES, RawReading, RawReadingError, RawResult, by_name, parse_reading
 
 if TYPE_CHECKING:
     from .poller import PointState
@@ -498,6 +498,9 @@ class ActiveQuirks:
                 sunspec_type=reading.type,
                 quirks=(reading.id,),
                 total=reading.total,
+                address=reading.address,
+                size=TYPES[reading.type][0],
+                table=reading.table,
             )
             for reading in self.readings
         ]

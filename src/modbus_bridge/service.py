@@ -19,7 +19,8 @@ from modbus_connection import ModbusError, ModbusUnit
 from modbus_connection.model.sunspec import SunSpecError
 
 from .implemented import ImplementedPoints, discover_implemented
-from .pics import PicsProfile, apply_pics
+from .mqtt_publisher import enabled_by_default
+from .pics import PicsProfile, apply_pics, pics_details, pics_status
 from .poller import PointState, Poller
 from .quirks import FORMAT as SET_FORMAT
 from .quirks import VERSION as SET_VERSION
@@ -218,6 +219,28 @@ class DeviceService:
     def interval(self) -> float:
         """Seconds between polls."""
         return self._interval
+
+    def point_info(self) -> dict[str, Any]:
+        """Where each point is read and what the PICS says about it (design P2U)."""
+        if self.poller is None:
+            raise RuntimeError("service not started")
+        profile = self._profile
+        points = {
+            key: {
+                "address": state.address,
+                "size": state.size,
+                "table": state.table,
+                "pics": pics_status(profile, key),
+                **pics_details(profile, key),
+                "ha_default": enabled_by_default(key),
+            }
+            for key, state in sorted(self.poller.snapshot.items())
+        }
+        pics = None
+        if profile is not None:
+            pics = {"certificate": profile.certificate,
+                    "source_url": profile.info.get("source_url")}  # fmt: skip
+        return {"device": self.device_id, "pics": pics, "points": points}
 
     @property
     def implemented(self) -> ImplementedPoints:
