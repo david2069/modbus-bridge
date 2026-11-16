@@ -25,7 +25,7 @@
   header h1 { font-size: 16px; margin: 0; }
   header .fetched { color: var(--muted); font-size: 13px; }
   header button { margin-left: auto; }
-  main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+  main { padding: 16px; max-width: 1800px; margin: 0 auto; }
   form.token { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   input, button, select { font: inherit; color: inherit; background: var(--panel);
                           border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
@@ -51,10 +51,9 @@
            vertical-align: top; }
   th { font-weight: 600; color: var(--muted); font-size: 12px; position: sticky; top: 0;
        background: var(--panel); }
-  td.key, td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
-                    overflow-wrap: anywhere; }
+  td.key, td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   td.num { font-variant-numeric: tabular-nums; }
-  td.id, td.key { white-space: nowrap; }
+  td.id { white-space: nowrap; }
   .missing { color: var(--missing); font-style: italic; }
   .small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
   .stale table, .stale .devices { opacity: 0.55; }
@@ -83,6 +82,12 @@
   .tools button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   .note { color: var(--warn); }
   td.nowrap { white-space: nowrap; }
+  /* Table text wraps at spaces only; a word too long makes its column wider, never split. */
+  .wrap td, .wrap th { overflow-wrap: normal; word-break: normal; padding-left: 7px; padding-right: 7px; }
+  /* The key stays in sight while the table scrolls sideways. */
+  .wrap td.key, .wrap th.key { position: sticky; left: 0; background: var(--panel); z-index: 1;
+                               box-shadow: inset -1px 0 0 var(--line); }
+  .wrap th.key { z-index: 2; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -208,7 +213,7 @@ function renderDevices() {
 
 function table(headers, rows) {
   return el("div", { class: "wrap" }, el("table", null,
-    el("thead", null, el("tr", null, headers.map((h) => el("th", null, h)))),
+    el("thead", null, el("tr", null, headers.map((h) => el("th", h === "Key" ? { class: "key" } : null, h)))),
     el("tbody", null, rows)));
 }
 
@@ -251,6 +256,21 @@ const noValue = (p) => p.value === null || p.value === undefined || p.available 
 
 /** A PICS entry as text; empty where the PICS gives none. */
 const picsText = (v) => (v === null || v === undefined ? "" : String(v));
+
+/** A point key that may break before a dot or after an underscore, never inside a name:
+ *  707.Crv[1].MustTrip[1].Pt[1].Tms, label.solar_remote_installed */
+function keyText(key) {
+  return key.split(/(?=\.)|(?<=_)/).flatMap((part, i) => (i ? [el("wbr", null), part] : [part]));
+}
+
+/** The PICS Min and Max as one range; empty where the PICS gives neither. */
+function rangeText(min, max) {
+  const lo = picsText(min), hi = picsText(max);
+  if (lo && hi) return `${lo} – ${hi}`;
+  if (lo) return `≥ ${lo}`;
+  if (hi) return `≤ ${hi}`;
+  return "";
+}
 
 /** A switch of buttons that keeps its choice in the browser. */
 function switcher(title, choices, current, keep, set) {
@@ -306,17 +326,16 @@ function renderPoints() {
         el("td", { class: "small" }, (p.quirks || []).join(", ")));
     }
     return el("tr", null,
-      el("td", { class: "key" }, p.key),
+      el("td", { class: "key" }, keyText(p.key)),
       el("td", null, p.label || ""),
       el("td", { class: "num" }, show(p.value, p)),
       el("td", null, p.units || ""),
-      el("td", { class: "mono small" }, p.type || ""),
+      el("td", { class: "mono small nowrap" }, p.type || ""),
       el("td", { class: "small" }, p.writable ? "RW" : "R"),
-      el("td", { class: "mono num", title: addressTitle(i) }, addressText(i)),
-      el("td", { class: "small nowrap" + (i.pics && i.pics !== "implemented" ? " note" : "") }, i.pics || ""),
+      el("td", { class: "mono num nowrap", title: addressTitle(i) }, addressText(i)),
+      el("td", { class: "small" + (i.pics && i.pics !== "implemented" ? " note" : "") }, i.pics || ""),
       el("td", { class: "mono num" }, picsText(i.certified)),
-      el("td", { class: "mono num" }, picsText(i.min)),
-      el("td", { class: "mono num" }, picsText(i.max)),
+      el("td", { class: "mono num nowrap" }, rangeText(i.min, i.max)),
       el("td", { class: "small" }, (p.quirks || []).join(", ")));
   });
   const body = el("div", null,
@@ -329,7 +348,7 @@ function renderPoints() {
     view === "simple" && info === null ? el("p", { class: "small note" }, "Point details are not loaded yet, so every point is shown.") : null,
     rows.length
       ? table(simple ? ["Label", "Value", "Units", "Quirks"]
-                     : ["Key", "Label", "Value", "Units", "Type", "Access", "Address", "PICS", "Certified", "Min", "Max", "Quirks"], rows)
+                     : ["Key", "Label", "Value", "Units", "Type", "R/W", "Address", "PICS", "Certified", "Range", "Quirks"], rows)
       : el("p", { class: "small" }, "No points match the filter."));
   return [el("div", { class: "explorer" }, list, body)];
 }
