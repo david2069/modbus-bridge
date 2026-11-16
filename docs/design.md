@@ -112,6 +112,20 @@ User quirk lifecycle:
 | U10 | App update | User quirks are kept. If a shipped quirk now covers the same reading, the user's quirk still wins and the user is told. |
 | U11 | Share | A user quirk can be exported with its reason and evidence, as a proposal for a shipped quirk. |
 
+### Shipped quirk lifecycle (draft for review, owner 2026-11-16)
+
+Many quirks are true only for one maker, model, firmware or country. Example: the reference aGate (firmware V10R01B04D00) gives the model 705 volt-var curve points as 207, 220, 240 and 258 in a field whose unit is percent of nominal voltage; they are the Australian volt-var points in volts. Nothing here is built yet.
+
+| # | Step | What happens |
+|---|---|---|
+| S1 | Add | A quirk starts from evidence: our own measurement (an emulator baseline or a scan the owner arranged), a public document, or another project's public quirk list, credited (rule 10). Never unpublished vendor material (rule 5). |
+| S2 | Scope | Each quirk names the makers, models and firmware it was seen on, and the country or grid setting when that matters. The scope is what was seen, never wider. |
+| S3 | Source | Each quirk records its source (repo, path and commit, or scan file and date) and the evidence: the raw values and what they should be. |
+| S4 | Verify | Each quirk is marked *verified* (we measured it on a device in scope) or *reported* (from another project, not measured by us). The UI shows which. |
+| S5 | Device outside scope | **Open (Q1):** show the raw value marked "not verified", or no value until someone checks. |
+| S6 | Retire | When a firmware fixes the fault, the scope is closed at the last firmware it was seen on. The quirk is kept, with its history, for devices still on older firmware. |
+| S7 | User settings | Some fixes need a fact the device does not report in public registers. Such a fact is a setting the user enters, not read from private registers. First case: battery type and count for R3 (owner, 2026-11-16). Without the setting, the rating has no value, never 0 (rule 8). |
+
 ## 2c. Modular design (D6, D7)
 
 Two parts joined by a REST API that is always on. Optional modules can be switched on or off. Home Assistant is fed through MQTT Discovery (D8). Changes are pushed by server-sent events (D9). Writes from modules come in their own phase after P2 (D10).
@@ -275,11 +289,11 @@ hilman2 lists no EVSE (car charger).
 | P0 | Baseline design | Agreed 2026-11-03 |
 | P1 | Read and publish baseline SunSpec: connect, Model 1, every model, standard names | An emulated aGate and one other SunSpec device publish correctly |
 | P2 | Quirk layers L2–L5, neutral labels, the evaluator (3a), user quirks (2b) and raw probe identity (C4), with FranklinWH first | FranklinWH extensions show under N1–N11, with every quirk visible; a raw-only emulated device is identified by probe and matched to its quirk layers |
-| P2U | A small read-only web UI at `/ui`, served by the bridge: devices, points, quirks and the audit log, from the token-protected API (owner, 2026-11-07). Points are grouped by SunSpec model, with model names from the shipped definitions (step 19). Each point shows its type, access, address (0- or 1-based), PICS status, certified value and Min/Max, with a simple view of the points HA enables by default and a full view of all (step 20). The table fits its page without splitting words, with a frozen Key column (step 21). P5 still brings over the FranklinWH bridge's UI | The page shows the same values as the API, with missing values shown as missing |
+| P2U | A small read-only web UI at `/ui`, served by the bridge: devices, points, quirks and the audit log, from the token-protected API (owner, 2026-11-07). Points are grouped by SunSpec model, with model names from the shipped definitions (step 19). Each point shows its type, access, address (0- or 1-based), PICS status, certified value and Min/Max, with a simple view of the points HA enables by default and a full view of all (step 20). The table fits its page without splitting words, with a frozen Key column (step 21). | The page shows the same values as the API, with missing values shown as missing |
 | P2W | Writes from modules through the REST API, limited by the quirk layers (D10) | Each write passes its own test plan against the emulator |
 | P3 | Import hilman2's quirk set for a maker, only when users need it, with credit | Each imported set loads and is credited |
 | P4 | Takeover of existing integrations | The cjne takeover test is repeated with modbus-bridge |
-| P5 | Bring over the FranklinWH bridge's web UI and other functions, each with an importer for its users' settings (D11) | One function at a time, each agreed first; each importer passes a test with exported data from that bridge |
+| P5 | General bridge functions for any supported device, built on modbus-connection: writes and sequences (after P2W), a scheduler, tariffs, alerts and diagnostics. Each is device-neutral and uses the neutral labels (N7, N8), not FranklinWH names. The FranklinWH bridge is one source of ideas, not a target to copy (owner, 2026-11-16) | One function at a time, each agreed first; each works against the emulator and a non-FranklinWH test device |
 
 ## 6. Decisions (owner, 2026-11-03)
 
@@ -304,12 +318,12 @@ hilman2 lists no EVSE (car charger).
 - **D8. Home Assistant is fed through MQTT Discovery,** as in franklinwh-modbus-bridge. The HA publisher is a client of the REST API (D7). Known consequence for P4: in the handover's takeover test, the MQTT method kept history and automations but lost user names, icons and areas.
 - **D9. Pushing changes.** A client asks the REST API for a full snapshot when it connects, then receives each change by server-sent events. Writes go the other way as ordinary REST requests.
 - **D10. Writes come after P2,** in their own phase (P2W), once the quirk layers can set safe limits. Each write has its own written test plan.
-- **D11. Import from franklinwh-modbus-bridge.** Users can import their schedules, billing and utility (tariff) templates and other module settings from franklinwh-modbus-bridge. Each module brought over in P5 comes with its importer. An import is checked and previewed before it is saved, and anything it cannot carry over is listed, never dropped silently.
+- **D11. Import from franklinwh-modbus-bridge (optional, later).** An importer for franklinwh-modbus-bridge settings (schedules, billing and tariff templates) may be added for users moving across. No P5 function needs it to work (owner, 2026-11-16). If added, an import is checked and previewed before it is saved, and anything it cannot carry over is listed, never dropped silently.
 - **D12. REST API and modules, learned from franklinwh-modbus-bridge** (review of commit fca3db3, 2026-11-03).
   1. Paths carry a version from the start: `/api/v1/...`.
   2. Clients that are programs (the MQTT publisher, modules) use API tokens. Browser sessions are for people only.
   3. Switching a module off stops its background work, not only its pages.
-  4. Reuse from franklinwh-modbus-bridge in P5: the scheduler and tariff logic, the UI, and its schedule and tariff export files as importer inputs (D11). Its wiring, module switches and login are not reused.
+  4. Ideas may be taken from franklinwh-modbus-bridge, and any reused code is credited (rule 10). FranklinWH-only parts, such as its wiring, its names and its 17000 registers, are not used (owner, 2026-11-16).
   5. Importers ask the user again for passwords and tokens; they are never copied from an old database.
   6. Imported schedules need a table from FranklinWH action and condition names to the neutral labels (N7, N8). This is settled with the label review in P2.
 
