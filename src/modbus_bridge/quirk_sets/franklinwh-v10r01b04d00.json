@@ -1,0 +1,15 @@
+{
+  "format": "modbus-bridge/quirk-set",
+  "version": 1,
+  "id": "franklinwh-v10r01b04d00",
+  "layer": "firmware",
+  "match": {"manufacturer": ["FranklinWH", "FranklinWH Technologies Co., Ltd"],
+            "firmware": {"min": "V10R01B04D00", "max": "V10R01B04D00"}},
+  "description": "FranklinWH aGate on firmware V10R01B04D00 only: corrections measured on that firmware (design 2b, S2).",
+  "source": "Read-only scan of the reference aGate, 2026-10-07, firmware V10R01B04D00: franklinwh-gateway-emulator tests/data/reference_scan_static_2026-10-07.json, commit 32a7af7 (MIT)",
+  "quirks": [
+    {"id": "fwh-fw10-q-705-v", "point": "705.Crv[*].Pt[*].V", "units": "V",
+     "reason": "Volt-var curve voltages are given in volts, not percent of nominal voltage as model 705 says: 20700, 22000, 24000, 25800 with V_SF -2 read as 207, 220, 240, 258 (the Australian volt-var points). VRef (100) and the Var points are in percent as the model says and are not changed. Only the unit changes; the value is kept. Seen on V10R01B04D00 only.",
+     "source": "franklinwh-gateway-emulator tests/data/reference_scan_static_2026-10-07.json (705 Crv[0..2].Pt[0..3].V, V_SF), commit 32a7af7 (MIT)"}
+  ]
+}
