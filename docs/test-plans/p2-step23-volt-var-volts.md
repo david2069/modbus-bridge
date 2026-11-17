@@ -1,6 +1,6 @@
 # Test plan: P2 step 23, volt-var curve voltages read as volts on the aGate
 
-Status: written on 2026-11-18, before the code; run the same day, all passed. Results are in section 5.
+Status: written on 2026-11-18, before the code; run the same day, all passed. Results are in section 5. Extended on 2026-11-18 to V12R02B60D00 (section 6), written before its tests.
 
 ## 1. Purpose
 
@@ -31,7 +31,7 @@ Evidence: read-only scan of the reference aGate, 2026-10-07 (firmware V10R01B04D
 
 ## 4. Not covered
 
-1. Firmware V12R02B60D00 and later: no 705 values have been read from them. If someone reads them, the scope can be widened with that evidence.
+1. Firmware other than V10R01B04D00 and V12R02B60D00: no 705 values have been read from it (V12R02B60D00 added in section 6).
 2. The "not verified" mark of S5 for a device outside a quirk's scope: not built yet.
 3. Other countries' aGates: their curves may be in percent as the model says.
 4. A real aGate.
@@ -49,3 +49,22 @@ Run on 2026-11-18 with the emulator v0.2.3-38 (commit 46b0605), `--no-control`.
 | T5 | Pass | My emulator and API stopped with SIGTERM; ports 5122 and 8120 free; no error or traceback in the API logs. The owner's run on 5120 and 8080 was not touched. |
 
 Found in the run: point keys count curves and points from 1 (`Crv[1]`, as the PICS does), not 0 as the scan file does. The first T3 script asked for `Crv[0].VRef` and got nothing; the test and the run were done again with 1-based keys.
+
+## 6. Extension: V12R02B60D00
+
+New evidence: a read-only capture of the reference aGate on 2026-11-17 at about 21:04, with `1.Vr` V12R02B60D00, made by the franklinwh-modbus agent and reported on franklinwh-modbus#146. Model 705 matches V10: `V_SF` −2, `Ena` 1, `NPt` 4, curves 1–3 the same, `Pt` V 20700/22000/24000/25800, `Var` 4400/0/0/−6000, `VRef` 10000.
+
+1. A second firmware-layer set, `quirk_sets/franklinwh-v12r02b60d00.json`, matched on V12R02B60D00 only, with quirk `fwh-fw12-q-705-v` (the same change). A single set covering V10 to V12 is not used, as it would also match firmware nobody has read (S2).
+2. T1 gains: both files load; on V12R02B60D00 the 12 points are in V with quirk `fwh-fw12-q-705-v`; firmware between or after them (V11R00B00D00, V12R02B60D01) keeps `VNomPct`. To check the tests can fail: change the V12 match to V12R02B61D00.
+3. T4 is reversed: on the emulator profile `agate-v12r02b60d00-candidate` the 12 points are in V, with the V12 quirk only.
+
+### Results
+
+Run on 2026-11-18, same emulator.
+
+| # | Result | Output |
+|---|---|---|
+| T1 | Pass | `505 passed` (11 in `tests/test_volt_var_volts.py`). Checked they can fail: the V12 match moved to V12R02B61D00 gave 2 failures; put back. |
+| T2 | Pass | `All checks passed!`, 89 files already formatted |
+| T4 | Pass | Profile `agate-v12r02b60d00-candidate`, firmware V12R02B60D00: all 12 points in `V`, values 207, 220, 240, 258, quirk `fwh-fw12-q-705-v` only. |
+| T5 | Pass | My emulator and API stopped; ports 5122 and 8120 free; no error in the API log. |

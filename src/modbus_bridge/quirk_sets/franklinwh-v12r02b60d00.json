@@ -1,0 +1,15 @@
+{
+  "format": "modbus-bridge/quirk-set",
+  "version": 1,
+  "id": "franklinwh-v12r02b60d00",
+  "layer": "firmware",
+  "match": {"manufacturer": ["FranklinWH", "FranklinWH Technologies Co., Ltd"],
+            "firmware": {"min": "V12R02B60D00", "max": "V12R02B60D00"}},
+  "description": "FranklinWH aGate on firmware V12R02B60D00 only: corrections measured on that firmware (design 2b, S2).",
+  "source": "Read-only capture of the reference aGate, 2026-11-17 about 21:04, 1.Vr V12R02B60D00, by the franklinwh-modbus agent; reported on david2069/franklinwh-modbus issue #146",
+  "quirks": [
+    {"id": "fwh-fw12-q-705-v", "point": "705.Crv[*].Pt[*].V", "units": "V",
+     "reason": "Volt-var curve voltages are given in volts, not percent of nominal voltage as model 705 says: 20700, 22000, 24000, 25800 with V_SF -2 read as 207, 220, 240, 258 (the Australian volt-var points). VRef (100) and the Var points are in percent as the model says and are not changed. Only the unit changes; the value is kept. Seen on V12R02B60D00 (and, in a separate set, V10R01B04D00).",
+     "source": "Capture of 2026-11-17, V12R02B60D00: 705 V_SF -2, Crv[1..3].Pt V 20700/22000/24000/25800, Var 4400/0/0/-6000, VRef 10000; david2069/franklinwh-modbus issue #146"}
+  ]
+}
