@@ -25,7 +25,7 @@ from .poller import PointState, Poller
 from .quirks import FORMAT as SET_FORMAT
 from .quirks import VERSION as SET_VERSION
 from .quirks import ActiveQuirks, QuirkError, QuirkSet, check_off, check_unique
-from .raw import read_raw
+from .raw import MAX_BLOCK, TABLES, read_raw
 from .sunspec import DeviceIdentity, SunSpecDevice, discover
 from .user_quirks import KINDS, SOURCE, AuditLog, UserQuirks, UserQuirkStore, check_kind
 
@@ -172,6 +172,10 @@ def _layout(device: SunSpecDevice) -> tuple[Any, ...]:
     return device.base_address, tuple((m.model_id, m.address, m.length) for m in device.chain)
 
 
+class NotReadable(RuntimeError):
+    """The device cannot be read on request now; nothing was read."""
+
+
 class DeviceService:
     """Discover one unit, then poll it on a timer and tell subscribers what changed."""
 
@@ -241,6 +245,32 @@ class DeviceService:
             pics = {"certificate": profile.certificate,
                     "source_url": profile.info.get("source_url")}  # fmt: skip
         return {"device": self.device_id, "pics": pics, "points": points}
+
+    async def read_registers(self, table: str, address: int, count: int) -> list[int]:
+        """Registers exactly as the device gives them, with no quirk applied (design S5).
+
+        Takes the poll lock, so it never shares the connection with a poll or a
+        test read (rule 7). Refused while the device is not ready, refused, or not
+        checked since the link was lost: the words must come from this device.
+        Modbus errors are raised to the caller, never turned into a value (rule 8).
+        """
+        if table not in TABLES:
+            raise ValueError(f"table must be one of {', '.join(TABLES)}")
+        if not 1 <= count <= MAX_BLOCK or not 0 <= address or address + count > 65536:
+            raise ValueError("address and count must stay within 0 to 65535, count 1 to 125")
+        async with self._poll_lock:
+            if self.poller is None:
+                raise NotReadable(f"Device {self.device_id!r} is not ready")
+            if self.refused is not None:
+                raise NotReadable(f"Device {self.device_id!r} is refused: {self.refused}")
+            if self._recheck:
+                raise NotReadable(
+                    f"Device {self.device_id!r} has not been checked since the link was lost; "
+                    "try again after the next poll"
+                )
+            if table == "input":
+                return list(await self._unit.read_input_registers(address, count))
+            return list(await self._unit.read_holding_registers(address, count))
 
     @property
     def implemented(self) -> ImplementedPoints:

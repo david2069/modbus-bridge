@@ -122,7 +122,7 @@ Many quirks are true only for one maker, model, firmware or country. Example: th
 | S2 | Scope | Each quirk names the makers, models and firmware it was seen on, and the country or grid setting when that matters. The scope is what was seen, never wider. |
 | S3 | Source | Each quirk records its source (repo, path and commit, or scan file and date) and the evidence: the raw values and what they should be. |
 | S4 | Verify | Each quirk is marked *verified* (we measured it on a device in scope) or *reported* (from another project, not measured by us). The UI shows which. |
-| S5 | Device outside scope | The quirk is not applied. The device's own value is shown as read, marked "not verified" for this quirk (owner, 2026-11-17). A raw value a client asks for is always returned as read: a quirk never hides it. |
+| S5 | Device outside scope | The quirk is not applied. The device's own value is shown as read, marked "not verified" for this quirk (owner, 2026-11-17). A raw value a client asks for is always returned as read: a quirk never hides it (`GET /api/v1/devices/{id}/registers`, step 22). |
 | S6 | Retire | When a firmware fixes the fault, the scope is closed at the last firmware it was seen on. The quirk is kept, with its history, for devices still on older firmware. |
 | S7 | User settings | Some fixes need a fact the device does not report in public registers. Such a fact is a setting the user enters, not read from private registers. First case: battery type and count for R3 (owner, 2026-11-16). Without the setting, the rating has no value, never 0 (rule 8). |
 

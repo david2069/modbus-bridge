@@ -1,8 +1,9 @@
 """The REST API (design D7, D9, D12): versioned paths, API tokens, snapshot and events.
 
-There are no writes to devices here (D10). The user's own quirks (design 2b) are
-created, checked, previewed, removed and switched off here. Each change is added
-to the device's audit log with the token that made it (U5, U8).
+There are no writes to devices here (D10). Any holding or input registers can be
+read on request, exactly as the device gives them (design 2b, S5). The user's own
+quirks (design 2b) are created, checked, previewed, removed and switched off here.
+Each change is added to the device's audit log with the token that made it (U5, U8).
 
 A read-only page is served at ``/ui`` (P2U). It holds no data and reads everything
 through the token-protected API.
@@ -15,16 +16,19 @@ import hmac
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from importlib.resources import files
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from modbus_connection import ModbusError, ModbusExceptionError
 
 from .quirks import QuirkError
+from .raw import MAX_BLOCK
 from .service import (
     AuditError,
     DeviceChanged,
     DeviceService,
+    NotReadable,
     UserQuirksOff,
     identity_json,
     point_json,
@@ -160,6 +164,29 @@ def create_app(
         if service.poller is None:
             raise HTTPException(status_code=503, detail=f"Device {device_id!r} is not ready")
         return service.point_info()
+
+    @app.get(f"{PREFIX}/devices/{{device_id}}/registers", dependencies=auth)
+    async def registers(
+        device_id: str,
+        address: Annotated[int, Query(ge=0, le=65535)],
+        count: Annotated[int, Query(ge=1, le=MAX_BLOCK)] = 1,
+        table: Literal["holding", "input"] = "holding",
+    ) -> dict[str, Any]:
+        service = get_service(device_id)
+        if address + count > 65536:
+            raise HTTPException(status_code=422, detail="the registers run past 65535")
+        try:
+            words = await service.read_registers(table, address, count)
+        except NotReadable as err:
+            raise HTTPException(status_code=503, detail=str(err)) from err
+        except ModbusExceptionError as err:
+            detail = f"the device refused the read: {type(err).__name__}: {err}"
+            raise HTTPException(status_code=502, detail=detail) from err
+        except ModbusError as err:
+            detail = f"the device could not be read: {type(err).__name__}: {err}"
+            raise HTTPException(status_code=503, detail=detail) from err
+        return {"device": service.device_id, "table": table, "address": address,
+                "count": count, "registers": words}  # fmt: skip
 
     @app.get(f"{PREFIX}/devices/{{device_id}}/quirks", dependencies=auth)
     async def quirks(device_id: str) -> dict[str, Any]:
